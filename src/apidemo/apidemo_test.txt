@@ -1,0 +1,5223 @@
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/AccountInfoPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+ import static com.ib.controller.Formats.fmt0;
+
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+
+import javax.swing.DefaultListModel;
+import javax.swing.JLabel;
+import javax.swing.JList;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
+import javax.swing.border.TitledBorder;
+import javax.swing.event.ListSelectionEvent;
+import javax.swing.event.ListSelectionListener;
+import javax.swing.table.AbstractTableModel;
+import javax.swing.table.TableCellRenderer;
+
+
+import apidemo.util.NewTabbedPanel;
+import apidemo.util.NewTabbedPanel.INewTab;
+
+import com.ib.controller.MarketValueTag;
+import com.ib.controller.Position;
+import com.ib.controller.ApiController.IAccountHandler;
+import com.ib.controller.Types.SecType;
+
+public class AccountInfoPanel extends JPanel implements INewTab, IAccountHandler {
+	private DefaultListModel m_acctList = new DefaultListModel();
+	private JList m_accounts = new JList( m_acctList);
+	private String m_selAcct = "";
+	private MarginModel m_marginModel = new MarginModel();
+	private JTable m_marginTable = new Table( m_marginModel);
+	private PortfolioModel m_portfolioModel = new PortfolioModel();
+	private JTable m_portfolioTable = new Table( m_portfolioModel);
+	private MktValModel m_mktValModel = new MktValModel();
+	private JTable m_mktValTable = new Table( m_mktValModel, 2);
+	private JLabel m_lastUpdated = new JLabel();
+
+	AccountInfoPanel() {
+		m_lastUpdated.setHorizontalAlignment( SwingConstants.RIGHT);
+		
+		m_accounts.setPreferredSize( new Dimension( 10000, 100) );
+		JScrollPane acctScroll = new JScrollPane( m_accounts);
+		acctScroll.setBorder( new TitledBorder( "Select Account"));
+
+		JScrollPane marginScroll = new JScrollPane( m_marginTable);
+		JScrollPane mvScroll = new JScrollPane( m_mktValTable);
+		JScrollPane portScroll = new JScrollPane( m_portfolioTable);
+		
+		NewTabbedPanel tabbedPanel = new NewTabbedPanel();
+		tabbedPanel.addTab( "Balances and Margin", marginScroll);
+		tabbedPanel.addTab( "Market Value", mvScroll);
+		tabbedPanel.addTab( "Portfolio", portScroll);
+		tabbedPanel.addTab( "Account Summary", new AccountSummaryPanel() );
+		tabbedPanel.addTab( "Market Value Summary", new MarketValueSummaryPanel() );
+		tabbedPanel.addTab( "Positions (all accounts)", new PositionsPanel() );
+		
+		setLayout( new BorderLayout() );
+		add( acctScroll, BorderLayout.NORTH);
+		add( tabbedPanel);
+		add( m_lastUpdated, BorderLayout.SOUTH);
+		
+		m_accounts.addListSelectionListener( new ListSelectionListener() {
+			@Override public void valueChanged(ListSelectionEvent e) {
+				onChanged();
+			}
+		});
+	}
+	
+	/** Called when the tab is first visited. */
+	@Override public void activated() {
+		for (String account : ApiDemo.INSTANCE.accountList() ) {
+			m_acctList.addElement( account);
+		}
+		
+		if (ApiDemo.INSTANCE.accountList().size() == 1) {
+			m_accounts.setSelectedIndex( 0);
+		}
+	}
+	
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+	}
+
+	protected synchronized void onChanged() {
+		int i = m_accounts.getSelectedIndex();
+		if (i != -1) {
+			String selAcct = (String)m_acctList.get( i);
+			if (!selAcct.equals( m_selAcct) ) {
+				m_selAcct = selAcct;
+				m_marginModel.clear();
+				m_mktValModel.clear();
+				m_portfolioModel.clear();
+				ApiDemo.INSTANCE.controller().reqAccountUpdates(true, m_selAcct, this);
+			}
+		}
+	}
+
+	/** Receive account value. */
+	public synchronized void accountValue(String account, String tag, String value, String currency) {
+		if (account.equals( m_selAcct) ) {
+			try {
+				MarketValueTag mvTag = MarketValueTag.valueOf( tag);
+				m_mktValModel.handle( account, currency, mvTag, value);
+			}
+			catch( Exception e) {
+				m_marginModel.handle( tag, value, currency, account);
+			}
+		}
+	}
+	
+	/** Receive position. */
+	public synchronized void updatePortfolio( Position position) {
+		if (position.account().equals( m_selAcct)) {
+			m_portfolioModel.update( position);
+		}
+	}
+
+	/** Receive time of last update. */
+	public void accountTime(String timeStamp) {
+		m_lastUpdated.setText( "Last updated: " + timeStamp + "       ");
+	}
+	
+	public void accountDownloadEnd(String account) {
+	}
+	
+	private class MarginModel extends AbstractTableModel {
+		HashMap<MarginRowKey,MarginRow> m_map = new HashMap<MarginRowKey,MarginRow>();
+		ArrayList<MarginRow> m_list = new ArrayList<MarginRow>();
+
+		void clear() {
+			m_map.clear();
+			m_list.clear();
+		}
+		
+		public void handle(String tag, String value, String currency, String account) {
+			// useless
+			if (tag.equals( "Currency")) {
+				return;
+			}
+			
+			int type = 0; // 0=whole acct; 1=securities; 2=commodities
+			
+			// "Securities" segment?
+			if (tag.endsWith( "-S") ) { 
+				tag = tag.substring( 0, tag.length() - 2);
+				type = 1;
+			}
+			
+			// "Commodities" segment?
+			else if (tag.endsWith( "-C") ) { 
+				tag = tag.substring( 0, tag.length() - 2);
+				type = 2;
+			}
+			
+			MarginRowKey key = new MarginRowKey( tag, currency);
+			MarginRow row = m_map.get( key);
+			
+			if (row == null) {
+				// don't add new rows with a value of zero
+				if (isZero( value) ) {
+					return;
+				}
+				
+				row = new MarginRow(tag, currency);
+				m_map.put( key, row);
+				m_list.add( row);
+				Collections.sort( m_list);
+			}
+			
+			switch( type) {
+				case 0: row.m_val = value; break;
+				case 1: row.m_secVal = value; break;
+				case 2: row.m_comVal = value; break;
+			}
+			
+			SwingUtilities.invokeLater( new Runnable() {
+				@Override public void run() {
+					fireTableDataChanged();
+				}
+			});
+		}
+
+		@Override public int getRowCount() {
+			return m_list.size();
+		}
+
+		@Override public int getColumnCount() {
+			return 4;
+		}
+		
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Tag";
+				case 1: return "Account Value";
+				case 2: return "Securities Value";
+				case 3: return "Commodities Value";
+				default: return null;
+			}
+		}
+
+		@Override public Object getValueAt(int rowIn, int col) {
+			MarginRow row = m_list.get( rowIn);
+			
+			switch( col) {
+				case 0: return row.m_tag;
+				case 1: return format( row.m_val, row.m_currency);
+				case 2: return format( row.m_secVal, row.m_currency);
+				case 3: return format( row.m_comVal, row.m_currency);
+				default: return null;
+			}
+		}
+	}
+	
+	private static class MarginRow implements Comparable<MarginRow> {
+		String m_tag;
+		String m_currency;
+		String m_val;
+		String m_secVal;
+		String m_comVal;
+
+		MarginRow( String tag, String cur) {
+			m_tag = tag;
+			m_currency = cur;
+		}
+
+		@Override public int compareTo(MarginRow o) {
+			return m_tag.compareTo( o.m_tag);
+		}
+	}
+	
+	private static class MarginRowKey {
+		String m_tag;
+		String m_currency;
+		
+		public MarginRowKey(String key, String currency) {
+			m_tag = key;
+			m_currency = currency;
+		}
+
+		@Override public int hashCode() {
+			int cur = m_currency != null ? m_currency.hashCode() : 0;
+			return m_tag.hashCode() + cur;
+		}
+
+		@Override public boolean equals(Object obj) {
+			MarginRowKey other = (MarginRowKey)obj;
+			return m_tag.equals( other.m_tag) &&
+				  (m_currency == null && other.m_currency == null || m_currency != null && m_currency.equals( other.m_currency) );
+		}
+	}
+	
+	static class MktValModel extends AbstractTableModel {
+		private HashMap<String,MktValRow> m_map = new HashMap<String,MktValRow>();
+		private ArrayList<MktValRow> m_list = new ArrayList<MktValRow>();
+		
+		void handle(String account, String currency, MarketValueTag mvTag, String value) {
+			String key = account + currency;
+			MktValRow row = m_map.get( key);
+			if (row == null) {
+				row = new MktValRow( account, currency);
+				m_map.put( key, row);
+				m_list.add( row);
+			}
+			row.set( mvTag, value);
+			fireTableDataChanged();
+		}
+
+		void clear() {
+			m_map.clear();
+			m_list.clear();
+			fireTableDataChanged();
+		}
+		
+		@Override public int getRowCount() {
+			return m_list.size();
+		}
+
+		@Override public int getColumnCount() {
+			return MarketValueTag.values().length + 2;
+		}
+		
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Account";
+				case 1: return "Currency";
+				default: return MarketValueTag.get( col - 2).toString();
+			}
+		}
+
+		@Override public Object getValueAt(int rowIn, int col) {
+			MktValRow row = m_list.get( rowIn);
+			switch( col) {
+				case 0: return row.m_account;
+				case 1: return row.m_currency;
+				default: return format( row.get( MarketValueTag.get( col - 2) ), null);
+			}
+		}
+	}
+	
+//	private static class MktValKey {
+//		String m_account;
+//		String m_currency;
+//
+//		public MktValKey(String account, String currency) {
+//			m_account = account;
+//			m_currency = currency;
+//		}
+//
+//		@Override public int hashCode() {
+//			return m_account.hashCode() + m_currency.hashCode();
+//		}
+//		
+//		@Override public boolean equals(Object obj) {
+//			MktValKey other = (MktValKey)obj;
+//			return m_account.equals( other.m_account) && m_currency.equals( other.m_currency);
+//		}
+//	}
+	
+	private static class MktValRow {
+		String m_account;
+		String m_currency;
+		HashMap<MarketValueTag,String> m_map = new HashMap<MarketValueTag,String>();
+		
+		public MktValRow(String account, String currency) {
+			m_account = account;
+			m_currency = currency;
+		}
+
+		public String get(MarketValueTag tag) {
+			return m_map.get( tag);
+		}
+
+		public void set(MarketValueTag tag, String value) {
+			m_map.put( tag, value);
+		}
+	}	
+
+	/** Shared with ExercisePanel. */
+	static class PortfolioModel extends AbstractTableModel {
+		private HashMap<Integer,Position> m_portfolioMap = new HashMap<Integer,Position>();
+		private ArrayList<Integer> m_positions = new ArrayList<Integer>(); // must store key because Position is overwritten
+		
+		void clear() {
+			m_positions.clear();
+			m_portfolioMap.clear();
+		}
+		
+		Position getPosition( int i) {
+			return m_portfolioMap.get( m_positions.get( i) );
+		}
+
+		public void update( Position position) {
+			// skip fake FX positions
+			if (position.contract().secType() == SecType.CASH) {
+				return;
+			}
+
+			if (!m_portfolioMap.containsKey( position.conid() ) && position.position() != 0) {
+				m_positions.add( position.conid() );
+			}
+			m_portfolioMap.put( position.conid(), position);
+			fireTableDataChanged();
+		}
+
+		@Override public int getRowCount() {
+			return m_positions.size();
+		}
+
+		@Override public int getColumnCount() {
+			return 7;
+		}
+		
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Description";
+				case 1: return "Position";
+				case 2: return "Price";
+				case 3: return "Value";
+				case 4: return "Avg Cost";
+				case 5: return "Unreal Pnl";
+				case 6: return "Real Pnl";
+				default: return null;
+			}
+		}
+
+		@Override public Object getValueAt(int row, int col) {
+			Position pos = getPosition( row);
+			switch( col) {
+				case 0: return pos.contract().description();
+				case 1: return pos.position();
+				case 2: return pos.marketPrice();
+				case 3: return format( "" + pos.marketValue(), null);
+				case 4: return pos.averageCost();
+				case 5: return pos.unrealPnl();
+				case 6: return pos.realPnl();
+				default: return null;
+			}
+		}
+	}
+
+	private static boolean isZero(String value) {
+		try {
+			return Double.parseDouble( value) == 0;
+		}
+		catch( Exception e) {
+			return false;
+		}
+	}
+
+	/** If val is a number, format it with commas and no decimals. */
+	static String format(String val, String currency) {
+		if (val == null || val.length() == 0) {
+			return null;
+		}
+
+		try {
+			double dub = Double.parseDouble( val);
+			val = fmt0( dub);
+		}
+		catch (Exception e) {	
+		}
+		
+		return currency != null && currency.length() > 0
+			? val + " " + currency : val;
+	}
+
+	/** Table where first n columsn are left-justified, all other columns are right-justified. */
+	static class Table extends JTable {
+		private int m_n;
+
+		public Table(AbstractTableModel model) {
+			this( model, 1);
+		}
+
+		public Table(AbstractTableModel model, int n) {
+			super( model);
+			m_n = n;
+		}
+
+		@Override public TableCellRenderer getCellRenderer(int row, int col) {
+			TableCellRenderer rend = super.getCellRenderer(row, col);
+			((JLabel)rend).setHorizontalAlignment( col < m_n ? SwingConstants.LEFT : SwingConstants.RIGHT);
+			return rend;
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/AccountSummaryPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.util.ArrayList;
+import java.util.HashMap;
+
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.table.AbstractTableModel;
+
+import apidemo.AccountInfoPanel.Table;
+import apidemo.util.HtmlButton;
+import apidemo.util.NewTabbedPanel.NewTabPanel;
+import apidemo.util.VerticalPanel;
+
+import com.ib.controller.AccountSummaryTag;
+import com.ib.controller.ApiController.IAccountSummaryHandler;
+import com.ib.controller.Formats;
+
+
+public class AccountSummaryPanel extends NewTabPanel {
+	private SummaryModel m_model = new SummaryModel();
+	
+	AccountSummaryPanel() {
+		HtmlButton sub = new HtmlButton( "Subscribe") {
+			protected void actionPerformed() {
+				subscribe();
+			}
+		};
+		
+		HtmlButton desub = new HtmlButton( "Desubscribe") {
+			protected void actionPerformed() {
+				desubscribe();
+			}
+		};
+		
+		JPanel buts = new VerticalPanel();
+		buts.add( sub);
+		buts.add( desub);
+		
+		JTable table = new Table( m_model);
+		JScrollPane scroll = new JScrollPane( table);
+		
+		setLayout( new BorderLayout() );
+		add( scroll);
+		add( buts, BorderLayout.EAST);
+	}
+
+	/** Called when the tab is first visited. */
+	@Override public void activated() {
+		subscribe();
+	}
+
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+		desubscribe();
+	}
+	
+	private void subscribe() {
+		ApiDemo.INSTANCE.controller().reqAccountSummary( "All", AccountSummaryTag.values(), m_model); 
+	}
+	
+	private void desubscribe() {
+		ApiDemo.INSTANCE.controller().cancelAccountSummary( m_model);
+		m_model.clear();
+	}
+	
+	private class SummaryModel extends AbstractTableModel implements IAccountSummaryHandler {
+		ArrayList<SummaryRow> m_rows = new ArrayList<SummaryRow>();
+		HashMap<String,SummaryRow> m_map = new HashMap<String,SummaryRow>();
+		boolean m_complete;
+
+		public void clear() {
+			ApiDemo.INSTANCE.controller().cancelAccountSummary( this);
+			m_rows.clear();
+			m_map.clear();
+			m_complete = false;
+			fireTableDataChanged();
+		}
+
+		@Override public void accountSummary(String account, AccountSummaryTag tag, String value, String currency) {
+			SummaryRow row = m_map.get( account);
+			if (row == null) {
+				row = new SummaryRow();
+				m_map.put( account, row);
+				m_rows.add( row);
+			}
+			row.update( account, tag, value);
+			
+			if (m_complete) {
+				fireTableDataChanged();
+			}
+		}
+		
+		@Override public void accountSummaryEnd() {
+			fireTableDataChanged();
+			m_complete = true;
+		}
+
+		@Override public int getRowCount() {
+			return m_rows.size();
+		}
+
+		@Override public int getColumnCount() {
+			return AccountSummaryTag.values().length + 1; // add one for Account column 
+		}
+		
+		@Override public String getColumnName(int col) {
+			if (col == 0) {
+				return "Account";
+			}
+			return AccountSummaryTag.values()[col - 1].toString();
+		}
+
+		@Override public Object getValueAt(int rowIn, int col) {
+			SummaryRow row = m_rows.get( rowIn);
+
+			if (col == 0) {
+				return row.m_account;
+			}
+			
+			AccountSummaryTag tag = AccountSummaryTag.values()[col - 1];
+			String val = row.m_map.get( tag);
+			
+			switch( tag) {
+				case Cushion: return fmtPct( val);
+				case LookAheadNextChange: return fmtTime( val);
+				default: return AccountInfoPanel.format( val, null);
+			}
+		}
+
+		public String fmtPct(String val) {
+			return val == null || val.length() == 0 ? null : Formats.fmtPct( Double.parseDouble( val) );
+		}
+
+		public String fmtTime(String val) {
+			return val == null || val.length() == 0 || val.equals( "0") ? null : Formats.fmtDate( Long.parseLong( val) * 1000);
+		}
+	}
+	
+	private static class SummaryRow {
+		String m_account;
+		HashMap<AccountSummaryTag,String> m_map = new HashMap<AccountSummaryTag,String>();
+		
+		public void update(String account, AccountSummaryTag tag, String value) {
+			m_account = account;
+			m_map.put( tag, value);
+		} 
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/AdvisorPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.util.ArrayList;
+
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.DefaultCellEditor;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.JTextField;
+import javax.swing.border.EmptyBorder;
+import javax.swing.border.TitledBorder;
+import javax.swing.table.AbstractTableModel;
+import javax.swing.table.TableCellEditor;
+
+
+import apidemo.util.HtmlButton;
+import apidemo.util.TCombo;
+import apidemo.util.VerticalPanel;
+import apidemo.util.NewTabbedPanel.NewTabPanel;
+
+import com.ib.controller.Alias;
+import com.ib.controller.Group;
+import com.ib.controller.Profile;
+import com.ib.controller.ApiController.IAdvisorHandler;
+import com.ib.controller.Profile.Type;
+import com.ib.controller.Types.FADataType;
+import com.ib.controller.Types.Method;
+
+public class AdvisorPanel extends NewTabPanel implements IAdvisorHandler {
+	static DefaultCellEditor DEF_CELL_EDITOR = new DefaultCellEditor( new JTextField() );
+	static {
+		DEF_CELL_EDITOR.setClickCountToStart( 1);
+	}
+	
+	private final GroupModel m_groupModel = new GroupModel();
+	private final ProfileModel m_profileModel = new ProfileModel();
+	private final AliasModel m_aliasModel = new AliasModel();
+	
+	private final JTable m_groupTable = new JTable( m_groupModel) {
+		public TableCellEditor getCellEditor(int row, int col) {
+			return m_groupModel.getCellEditor(row, col);
+		}
+	};
+
+	private final JTable m_profileTable = new JTable( m_profileModel) {
+		public TableCellEditor getCellEditor(int row, int col) {
+			return m_profileModel.getCellEditor(row, col);
+		}
+	};
+
+	private final JTable m_aliasTable = new JTable( m_aliasModel);
+
+	AdvisorPanel() {
+		JPanel mainPanel = new JPanel();
+		mainPanel.setLayout( new BoxLayout( mainPanel, BoxLayout.Y_AXIS));
+		mainPanel.setBorder( new EmptyBorder( 0, 10, 0, 0) );
+		mainPanel.add( new GroupsPanel() );
+		mainPanel.add( Box.createVerticalStrut(10));
+		mainPanel.add( new ProfilesPanel() );
+		
+		JScrollPane aliasScroll = new JScrollPane( m_aliasTable);
+		aliasScroll.setBorder( new TitledBorder( "Aliases"));
+		aliasScroll.setPreferredSize(new Dimension( 300, 2000));
+		
+		setLayout( new BorderLayout() );
+		add( aliasScroll, BorderLayout.WEST);
+		add( mainPanel);
+	}
+
+	/** Called when the tab is first visited. */
+	@Override public void activated() {
+		ApiDemo.INSTANCE.controller().reqAdvisorData( FADataType.GROUPS, this);
+		ApiDemo.INSTANCE.controller().reqAdvisorData( FADataType.PROFILES, this );
+		ApiDemo.INSTANCE.controller().reqAdvisorData( FADataType.ALIASES, this );
+	}
+	
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+	}
+
+	public void groups(ArrayList<Group> groups) {
+		m_groupModel.update( groups);
+	}
+
+	public void profiles(ArrayList<Profile> profiles) {
+		m_profileModel.update( profiles);
+	}
+
+	public void aliases(ArrayList<Alias> aliases) {
+		m_aliasModel.update( aliases);
+	}
+	
+	private class AliasModel extends AbstractTableModel {
+		ArrayList<Alias> m_list = new ArrayList<Alias>();
+		
+		@Override public int getRowCount() {
+			return m_list.size();
+		}
+
+		public void update(ArrayList<Alias> aliases) {
+			m_list.clear();
+			m_list.addAll( aliases);
+			fireTableDataChanged();
+		}
+
+		@Override public int getColumnCount() {
+			return 2;
+		}
+
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Account";
+				case 1: return "Alias";
+				default: return null;
+			}
+		}
+		
+		@Override public Object getValueAt(int rowIn, int col) {
+			Alias row = m_list.get( rowIn);
+			switch( col) {
+				case 0: return row.account();
+				case 1: return row.alias();
+				default: return null;
+			}
+		}
+	}
+	
+	private class GroupsPanel extends JPanel {
+		GroupsPanel() {
+			JScrollPane groupScroll = new JScrollPane( m_groupTable);
+			groupScroll.setBorder( new TitledBorder( "Groups"));
+			
+			HtmlButton create = new HtmlButton( "Create Group") {
+				@Override protected void actionPerformed() {
+					onCreateGroup();
+				}
+			};
+
+			HtmlButton update = new HtmlButton( "Update") {
+				@Override protected void actionPerformed() {
+					onTransmit();
+				}
+			};
+			
+			JPanel buts = new VerticalPanel();
+			buts.add( create);
+			buts.add( update);
+
+			setLayout( new BorderLayout() );
+			add( groupScroll);
+			add( buts, BorderLayout.EAST);
+		}
+
+		protected void onCreateGroup() {
+			String name = JOptionPane.showInputDialog( this, "Enter group name");
+			if (name != null) {
+				m_groupModel.add( name);
+			}
+		}
+
+		protected void onTransmit() {
+			int rc = JOptionPane.showConfirmDialog( this, "This will replace all Groups in TWS with the ones shown here.\nAre you sure you want to do that?", "Confirm", JOptionPane.YES_NO_OPTION);
+			if (rc == 0) {
+				m_groupModel.transmit();
+				JOptionPane.showMessageDialog(this, "The groups have been updated");
+			}
+		}
+	}
+	
+	private static class GroupModel extends AbstractTableModel {
+		TCombo<Method> combo = new TCombo<Method>(Method.values());
+		DefaultCellEditor EDITOR = new DefaultCellEditor( combo);
+		ArrayList<Group> m_groups = new ArrayList<Group>();
+		
+		GroupModel() {		
+			EDITOR.setClickCountToStart( 1);
+		}
+		
+		void update(ArrayList<Group> groups) {
+			m_groups.clear();
+			m_groups.addAll( groups);
+			fireTableDataChanged();
+		}
+
+		void add(String name) {
+			Group group = new Group();
+			group.name( name);
+			m_groups.add( group);
+			fireTableDataChanged();
+		}
+
+		public void transmit() {
+			ApiDemo.INSTANCE.controller().updateGroups(m_groups);
+		}
+
+		@Override public int getRowCount() {
+			return m_groups.size();
+		}
+
+		@Override public int getColumnCount() {
+			return 3;
+		}
+
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Name";
+				case 1: return "Default Method";
+				case 2: return "Accounts";
+				default: return null;
+			}
+		}
+		
+		@Override public Object getValueAt(int rowIn, int col) {
+			Group row = m_groups.get( rowIn);
+			switch( col) {
+				case 0: return row.name();
+				case 1: return row.defaultMethod();
+				case 2: return row.accounts().toString().substring( 1, row.accounts().toString().length() - 1);
+				default: return null;
+			}
+		}
+		
+		@Override public boolean isCellEditable(int rowIndex, int col) {
+			return true;
+		}
+		
+		public TableCellEditor getCellEditor(int row, int col) {
+			return col == 1 ? EDITOR : DEF_CELL_EDITOR;
+		}
+		
+		@Override public void setValueAt(Object val, int rowIn, int col) {
+			Group row = m_groups.get( rowIn);
+			switch( col) {
+				case 0: row.name( (String)val); break;
+				case 1: row.defaultMethod( (Method)val); break;
+				case 2: row.setAllAccounts( (String)val); break;
+			}
+		}
+	}
+	
+	private class ProfilesPanel extends JPanel {
+		ProfilesPanel() {
+			JScrollPane profileScroll = new JScrollPane( m_profileTable);
+			profileScroll.setBorder( new TitledBorder( "Profiles"));
+
+			HtmlButton create = new HtmlButton( "Create Profile") {
+				@Override protected void actionPerformed() {
+					onCreateProfile();
+				}
+			};
+
+			HtmlButton update = new HtmlButton( "Update") {
+				@Override protected void actionPerformed() {
+					onTransmit();
+				}
+			};
+
+			JPanel buts = new VerticalPanel();
+			buts.add( create);
+			buts.add( update);
+
+			setLayout( new BorderLayout() );
+			add( profileScroll);
+			add( buts, BorderLayout.EAST);
+		}
+
+		void onCreateProfile() {
+			String name = JOptionPane.showInputDialog( this, "Enter profile name");
+			if (name != null) {
+				m_profileModel.add( name);
+			}
+		}
+
+		void onTransmit() {
+			int rc = JOptionPane.showConfirmDialog( this, "This will replace all Profiles in TWS with the ones shown here.\nAre you sure you want to do that?", "Confirm", JOptionPane.YES_NO_OPTION);
+			if (rc == 0) {
+				m_profileModel.transmit();
+				JOptionPane.showMessageDialog(this, "The Profiles have been updated");
+			}
+		}
+	}
+	
+	private static class ProfileModel extends AbstractTableModel {
+		TCombo<Type> combo = new TCombo<Type>(Type.values());
+		DefaultCellEditor EDITOR = new DefaultCellEditor( combo);
+		ArrayList<Profile> m_profiles = new ArrayList<Profile>();
+		
+		ProfileModel() {		
+			EDITOR.setClickCountToStart( 1);
+			combo.removeItemAt( 0);
+		}
+		
+		public void update(ArrayList<Profile> profiles) {
+			m_profiles.clear();
+			m_profiles.addAll( profiles);
+			fireTableDataChanged();
+		}
+
+		public void add(String name) {
+			Profile profile = new Profile();
+			profile.name( name);
+			m_profiles.add( profile);
+			fireTableDataChanged();
+		}
+
+		public void transmit() {
+			ApiDemo.INSTANCE.controller().updateProfiles( m_profiles);
+		}
+
+		@Override public int getRowCount() {
+			return m_profiles.size();
+		}
+
+		@Override public int getColumnCount() {
+			return 3;
+		}
+
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Name";
+				case 1: return "Type";
+				case 2: return "Allocations";
+				default: return null;
+			}
+		}
+		
+		@Override public Object getValueAt(int rowIn, int col) {
+			Profile row = m_profiles.get( rowIn);
+			switch( col) {
+				case 0: return row.name();
+				case 1: return row.type();
+				case 2: return row.allocations().toString().substring( 1, row.allocations().toString().length() - 1);
+				default: return null;
+			}
+		}
+		
+		@Override public boolean isCellEditable(int rowIndex, int columnIndex) {
+			return true;
+		}
+		
+		public TableCellEditor getCellEditor(int row, int col) {
+			return col == 1 ? EDITOR : DEF_CELL_EDITOR;
+		}
+
+		@Override public void setValueAt(Object val, int rowIn, int col) {
+			Profile row = m_profiles.get( rowIn);
+			switch( col) {
+				case 0: row.name( (String)val); break;
+				case 1: row.type( (Type)val); break;
+				case 2: row.setAllocations( (String)val); break;
+			}
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/ApiDemo.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.awt.Rectangle;
+import java.util.ArrayList;
+
+import javax.swing.Box;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
+import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
+import javax.swing.border.EmptyBorder;
+
+import apidemo.util.HtmlButton;
+import apidemo.util.NewLookAndFeel;
+import apidemo.util.NewTabbedPanel;
+import apidemo.util.VerticalPanel;
+
+import com.ib.controller.ApiConnection.ILogger;
+import com.ib.controller.ApiController;
+import com.ib.controller.ApiController.IBulletinHandler;
+import com.ib.controller.ApiController.IConnectionHandler;
+import com.ib.controller.ApiController.ITimeHandler;
+import com.ib.controller.Formats;
+import com.ib.controller.Types.NewsType;
+
+public class ApiDemo implements IConnectionHandler {
+	static { NewLookAndFeel.register(); }
+	static ApiDemo INSTANCE = new ApiDemo();
+
+	private final JTextArea m_inLog = new JTextArea();
+	private final JTextArea m_outLog = new JTextArea();
+	private final Logger m_inLogger = new Logger( m_inLog);
+	private final Logger m_outLogger = new Logger( m_outLog);
+	private final ApiController m_controller = new ApiController( this, m_inLogger, m_outLogger);
+	private final ArrayList<String> m_acctList = new ArrayList<String>();
+	private final JFrame m_frame = new JFrame();
+	private final NewTabbedPanel m_tabbedPanel = new NewTabbedPanel(true);
+	private final ConnectionPanel m_connectionPanel = new ConnectionPanel();
+	private final MarketDataPanel m_mktDataPanel = new MarketDataPanel();
+	private final ContractInfoPanel m_contractInfoPanel = new ContractInfoPanel();
+	private final TradingPanel m_tradingPanel = new TradingPanel();
+	private final AccountInfoPanel m_acctInfoPanel = new AccountInfoPanel();
+	private final OptionsPanel m_optionsPanel = new OptionsPanel();
+	private final AdvisorPanel m_advisorPanel = new AdvisorPanel();
+	private final ComboPanel m_comboPanel = new ComboPanel();
+	private final StratPanel m_stratPanel = new StratPanel();
+	private final JTextArea m_msg = new JTextArea();
+
+	// getter methods
+	public ArrayList<String> accountList() 	{ return m_acctList; }
+	public ApiController controller() 		{ return m_controller; }
+	public JFrame frame() 					{ return m_frame; }
+
+	public static void main(String[] args) {
+		INSTANCE.run();
+	}
+	
+	private void run() {
+		m_tabbedPanel.addTab( "Connection", m_connectionPanel);
+		m_tabbedPanel.addTab( "Market Data", m_mktDataPanel);
+		m_tabbedPanel.addTab( "Trading", m_tradingPanel);
+		m_tabbedPanel.addTab( "Account Info", m_acctInfoPanel);
+		m_tabbedPanel.addTab( "Options", m_optionsPanel);
+		m_tabbedPanel.addTab( "Combos", m_comboPanel);
+		m_tabbedPanel.addTab( "Contract Info", m_contractInfoPanel);
+		m_tabbedPanel.addTab( "Advisor", m_advisorPanel);
+		// m_tabbedPanel.addTab( "Strategy", m_stratPanel); in progress
+			
+		m_msg.setEditable( false);
+		m_msg.setLineWrap( true);
+		JScrollPane msgScroll = new JScrollPane( m_msg);
+		msgScroll.setPreferredSize( new Dimension( 10000, 120) );
+
+		JScrollPane outLogScroll = new JScrollPane( m_outLog);
+		outLogScroll.setPreferredSize( new Dimension( 10000, 120) );
+
+		JScrollPane inLogScroll = new JScrollPane( m_inLog);
+		inLogScroll.setPreferredSize( new Dimension( 10000, 120) );
+
+		NewTabbedPanel bot = new NewTabbedPanel();
+		bot.addTab( "Messages", msgScroll);
+		bot.addTab( "Log (out)", outLogScroll);
+		bot.addTab( "Log (in)", inLogScroll);
+		
+        m_frame.add( m_tabbedPanel);
+        m_frame.add( bot, BorderLayout.SOUTH);
+        m_frame.setSize( 1024, 768);
+        m_frame.setVisible( true);
+        m_frame.setDefaultCloseOperation( JFrame.EXIT_ON_CLOSE);
+        
+        // make initial connection to local host, port 7496, client id 0
+		m_controller.connect( "127.0.0.1", 7496, 0);
+    }
+	
+	@Override public void connected() {
+		show( "connected");
+		m_connectionPanel.m_status.setText( "connected");
+		
+		m_controller.reqCurrentTime( new ITimeHandler() {
+			@Override public void currentTime(long time) {
+				show( "Server date/time is " + Formats.fmtDate(time * 1000) );
+			}
+		});
+		
+		m_controller.reqBulletins( true, new IBulletinHandler() {
+			@Override public void bulletin(int msgId, NewsType newsType, String message, String exchange) {
+				String str = String.format( "Received bulletin:  type=%s  exchange=%s", newsType, exchange);
+				show( str);
+				show( message);
+			}
+		});
+	}
+	
+	@Override public void disconnected() {
+		show( "disconnected");
+		m_connectionPanel.m_status.setText( "disconnected");
+	}
+
+	@Override public void accountList(ArrayList<String> list) {
+		show( "Received account list");
+		m_acctList.clear();
+		m_acctList.addAll( list);
+	}
+
+	@Override public void show( final String str) {
+		SwingUtilities.invokeLater( new Runnable() {
+			@Override public void run() {
+				m_msg.append(str);
+				m_msg.append( "\n\n");
+				
+				Dimension d = m_msg.getSize();
+				m_msg.scrollRectToVisible( new Rectangle( 0, d.height, 1, 1) );
+			}
+		});
+	}
+
+	@Override public void error(Exception e) {
+		show( e.toString() );
+	}
+	
+	@Override public void message(int id, int errorCode, String errorMsg) {
+		show( id + " " + errorCode + " " + errorMsg);
+	}
+	
+	private class ConnectionPanel extends JPanel {
+		private final JTextField m_host = new JTextField(7);
+		private final JTextField m_port = new JTextField( "7496", 7);
+		private final JTextField m_clientId = new JTextField("0", 7);
+		private final JLabel m_status = new JLabel("Disconnected");
+		
+		public ConnectionPanel() {
+			HtmlButton connect = new HtmlButton("Connect") {
+				@Override public void actionPerformed() {
+					onConnect();
+				}
+			};
+
+			HtmlButton disconnect = new HtmlButton("Disconnect") {
+				@Override public void actionPerformed() {
+					m_controller.disconnect();
+				}
+			};
+			
+			JPanel p1 = new VerticalPanel();
+			p1.add( "Host", m_host);
+			p1.add( "Port", m_port);
+			p1.add( "Client ID", m_clientId);
+			
+			JPanel p2 = new VerticalPanel();
+			p2.add( connect);
+			p2.add( disconnect);
+			p2.add( Box.createVerticalStrut(20));
+			
+			JPanel p3 = new VerticalPanel();
+			p3.setBorder( new EmptyBorder( 20, 0, 0, 0));
+			p3.add( "Connection status: ", m_status);
+			
+			JPanel p4 = new JPanel( new BorderLayout() );
+			p4.add( p1, BorderLayout.WEST);
+			p4.add( p2);
+			p4.add( p3, BorderLayout.SOUTH);
+
+			setLayout( new BorderLayout() );
+			add( p4, BorderLayout.NORTH);
+		}
+
+		protected void onConnect() {
+			int port = Integer.parseInt( m_port.getText() );
+			int clientId = Integer.parseInt( m_clientId.getText() );
+			m_controller.connect( m_host.getText(), port, clientId);
+		}
+	}
+	
+	private static class Logger implements ILogger {
+		final private JTextArea m_area;
+
+		Logger( JTextArea area) {
+			m_area = area;
+		}
+
+		@Override public void log(final String str) {
+			SwingUtilities.invokeLater( new Runnable() {
+				@Override public void run() {
+//					m_area.append(str);
+//					
+//					Dimension d = m_area.getSize();
+//					m_area.scrollRectToVisible( new Rectangle( 0, d.height, 1, 1) );
+				}
+			});
+		}
+	}
+}
+
+// do clearing support
+// change from "New" to something else
+// more dn work, e.g. deltaNeutralValidation
+// add a "newAPI" signature
+// probably should not send F..A position updates to listeners, at least not to API; also probably not send FX positions; or maybe we should support that?; filter out models or include it 
+// finish or remove strat panel
+// check all ps
+// must allow normal summary and ledger at the same time
+// you could create an enum for normal account events and pass segment as a separate field
+// check pacing violation
+// newticktype should break into price, size, and string?
+// give "already subscribed" message if appropriate
+
+// BUGS
+// When API sends multiple snapshot requests, TWS sends error "Snapshot exceeds 100/sec" even when it doesn't
+// When API requests SSF contracts, TWS sends both dividend protected and non-dividend protected contracts. They are indistinguishable except for having different conids.
+// Fundamentals financial summary works from TWS but not from API 
+// When requesting fundamental data for IBM, the data is returned but also an error
+// The "Request option computation" method seems to have no effect; no data is ever returned
+// When an order is submitted with the "End time" field, it seems to be ignored; it is not submitted but also no error is returned to API.
+// Most error messages from TWS contain the class name where the error occurred which gets garbled to gibberish during obfuscation; the class names should be removed from the error message 
+// If you exercise option from API after 4:30, TWS pops up a message; TWS should never popup a message due to an API request
+// TWS did not desubscribe option vol computation after API disconnect
+// Several error message are misleading or completely wrong, such as when upperRange field is < lowerRange
+// Submit a child stop with no stop price; you get no error, no rejection
+// When a child order is transmitted with a different contract than the parent but no hedge params it sort of works but not really, e.g. contract does not display at TWS, but order is working
+// Switch between frozen and real-time quotes is broken; e.g.: request frozen quotes, then realtime, then request option market data; you don't get bid/ask; request frozen, then an option; you don't get anything
+// TWS pops up mkt data warning message in response to api order
+
+// API/TWS Changes
+// we should add underConid for sec def request sent API to TWS so option chains can be requested properly
+// reqContractDetails needs primary exchange, currently only takes currency which is wrong; all requests taking Contract should be updated
+// reqMktDepth and reqContractDetails does not take primary exchange but it needs to; ideally we could also pass underConid in request
+// scanner results should return primary exchange
+// the check margin does not give nearly as much info as in TWS
+// need clear way to distinguish between order reject and warning
+
+// API Improvements
+// add logging support
+// we need to add dividendProt field to contract description
+// smart live orders should be getting primary exchange sent down
+
+// TWS changes
+// TWS sends acct update time after every value; not necessary
+// support stop price for trailing stop order (currently only for trailing stop-limit)
+// let TWS come with 127.0.0.1 enabled, same is IBG
+// we should default to auto-updating client zero with new trades and open orders
+
+// NOTES TO USERS
+// you can get all orders and trades by setting "master id" in the TWS API config
+// reqManagedAccts() is not needed because managed accounts are sent down on login
+// TickType.LAST_TIME comes for all top mkt data requests
+// all option ticker requests trigger option model calc and response
+// DEV: All Box layouts have max size same as pref size; but center border layout ignores this
+// DEV: Box layout grows items proportionally to the difference between max and pref sizes, and never more than max size
+
+//TWS sends error "Snapshot exceeds 100/sec" even when it doesn't; maybe try flush? or maybe send 100 then pause 1 second? this will take forever; i think the limit needs to be increased
+
+//req open orders can only be done by client 0 it seems; give a message
+//somehow group is defaulting to EqualQuantity if not set; seems wrong
+//i frequently see order canceled - reason: with no text
+//Missing or invalid NonGuaranteed value. error should be split into two messages
+//Rejected API order is downloaded as Inactive open order; rejected orders should never be sen
+//Submitting an initial stop price for trailing stop orders is supported only for trailing stop-limit orders; should be supported for plain trailing stop orders as well 
+//EMsgReqOptCalcPrice probably doesn't work since mkt data code was re-enabled
+//barrier price for trail stop lmt orders why not for trail stop too?
+//All API orders default to "All" for F; that's not good
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/Chart.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.Graphics;
+import java.util.ArrayList;
+
+import javax.swing.JComponent;
+
+import com.ib.controller.Bar;
+
+public class Chart extends JComponent {
+	private static final int width = 5;
+	private int height;
+	private double min;
+	private double max;
+	private final ArrayList<Bar> m_rows;
+	private double m_current = 118;
+	
+	public void current( double v) { m_current = v; }
+	
+	public Chart(ArrayList<Bar> rows) {
+		m_rows = rows;
+	}
+	
+	@Override protected void paintComponent(Graphics g) {
+		height = getHeight();
+		min = getMin();
+		max = getMax();
+	
+		int x = 1;
+		for (Bar bar : m_rows) {
+			int high = getY( bar.high() );
+			int low = getY( bar.low() ); 
+			int open = getY( bar.open() );
+			int close = getY( bar.close() );
+
+			// draw high/low line
+			g.setColor( Color.black);
+			g.drawLine(x + 1, high, x + 1, low);
+			
+			if (bar.close() > bar.open() ) {
+				g.setColor( Color.green);
+				g.fillRect(x, close, 3, open - close);
+			}
+			else {
+				g.setColor( Color.red);
+				g.fillRect(x, open, 3, close - open);
+			}
+
+			x += width;
+		}
+
+		// draw price line
+		g.setColor( Color.black);
+		int y = getY( m_current);
+		g.drawLine( 0, y, m_rows.size() * width, y);
+	}
+	
+	/** Convert bar value to y coordinate. */
+	private int getY( double v) {
+		double span = max - min;
+		double pct = (v - min) / span;
+		double val = pct * height + .5;
+		return height - (int)val;
+	}
+	
+	@Override public Dimension getPreferredSize() {// why on main screen 1 is okay but not here?
+		return new Dimension( m_rows.size() * width, 100);
+	}
+	
+	private double getMin() {
+		double min = Double.MAX_VALUE;
+		for( Bar bar : m_rows) {
+			min = Math.min( min, bar.low() );
+		}
+		return min;
+	}
+	
+	private double getMax() {
+		double max = 0;
+		for( Bar bar : m_rows) {
+			max = Math.max( max, bar.high() );
+		}
+		return max;
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/ComboPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.util.ArrayList;
+
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JCheckBox;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.border.EmptyBorder;
+import javax.swing.border.TitledBorder;
+import javax.swing.table.AbstractTableModel;
+
+
+import apidemo.OrdersPanel.OrderRow;
+import apidemo.OrdersPanel.OrdersModel;
+import apidemo.TopModel.TopRow;
+import apidemo.util.HtmlButton;
+import apidemo.util.NewTabbedPanel;
+import apidemo.util.TCombo;
+import apidemo.util.UpperField;
+import apidemo.util.VerticalPanel;
+import apidemo.util.NewTabbedPanel.INewTab;
+import apidemo.util.VerticalPanel.HorzPanel;
+
+import com.ib.controller.DeltaNeutralContract;
+import com.ib.controller.NewComboLeg;
+import com.ib.controller.NewContract;
+import com.ib.controller.NewContractDetails;
+import com.ib.controller.NewOrder;
+import com.ib.controller.NewOrderState;
+import com.ib.controller.ApiController.IContractDetailsHandler;
+import com.ib.controller.ApiController.IEfpHandler;
+import com.ib.controller.Types.Action;
+import com.ib.controller.Types.SecType;
+
+
+public class ComboPanel extends JPanel implements INewTab {
+	private final OrdersModel m_ordersModel = new OrdersModel() {
+		@Override protected boolean shouldAdd(NewContract contract, NewOrder order, NewOrderState orderState) {
+			return contract.isCombo();
+		}
+	};
+	
+	ComboPanel() {
+		NewTabbedPanel tabs = new NewTabbedPanel();
+		tabs.addTab( "Spreads", new SpreadsPanel() );
+		tabs.addTab( "EFP's", new EfpPanel() );
+		
+		final JTable ordersTable = new JTable( m_ordersModel);
+		JScrollPane ordersScroll = new JScrollPane( ordersTable);
+		ordersScroll.setBorder( new TitledBorder( "Live Combo Orders"));
+		
+		ordersTable.addMouseListener( new MouseAdapter() {
+			public void mouseClicked(MouseEvent e) {
+				if (e.getClickCount() == 2) {
+					onDoubleClick( ordersTable.getSelectedRow() );
+				}
+			}
+		});
+
+		setLayout( new BoxLayout( this, BoxLayout.Y_AXIS) );
+		add( tabs);
+		add( ordersScroll);
+	}
+
+	/** Called when the tab is first visited. */
+	@Override public void activated() {
+		ApiDemo.INSTANCE.controller().reqLiveOrders( m_ordersModel);
+	}
+
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+	}
+	
+	protected void onDoubleClick(int row) {
+		if (row != -1) {
+			OrderRow order = m_ordersModel.get( row);
+			TicketDlg dlg = new TicketDlg( order.m_contract, order.m_order);
+			dlg.setVisible( true);
+		}
+	}
+	
+	static class SpreadsPanel extends JPanel {
+		private final NewContract m_contract = new NewContract(); 
+		private final TCombo<Action> m_action = new TCombo<Action>( Action.values() );
+		private final UpperField m_ratio = new UpperField( "1");
+		private final ContractPanel m_contractPanel = new ComboContractPanel();
+		private final ArrayList<LegRow> m_legRows = new ArrayList<LegRow>();
+		private final LegModel m_legsModel = new LegModel( m_legRows);
+		private final JTable m_legsTable = new JTable( m_legsModel);
+		private final TopModel m_mktDataModel = new TopModel();
+		private final JTable m_mktDataTable = new JTable( m_mktDataModel);
+		private DeltaNeutralContract m_dnContract;
+		private final DnPanel m_dnPanel = new DnPanel();
+		private final JLabel m_dnText = new JLabel();
+
+		SpreadsPanel() {
+			HtmlButton addLeg = new HtmlButton( "Add Leg") {
+				@Override protected void actionPerformed() {
+					onAddLeg();
+				}
+			};
+
+			HtmlButton removeLeg = new HtmlButton( "Remove Selected Leg") {
+				@Override protected void actionPerformed() {
+					onRemoveLeg();
+				}
+			};
+
+			HtmlButton removeLegs = new HtmlButton( "Clear All Legs") {
+				@Override protected void actionPerformed() {
+					onRemoveLegs();
+				}
+			};
+
+			HtmlButton mktData = new HtmlButton( "Request Market Data") {
+				@Override protected void actionPerformed() {
+					onReqMktData();
+				}
+			};
+
+			HtmlButton placeOrder = new HtmlButton( "Place Order") {
+				@Override protected void actionPerformed() {
+					onPlaceOrder();
+				}
+			};
+
+			VerticalPanel buts = new VerticalPanel();
+			buts.add( addLeg);
+			buts.add( removeLeg);
+			buts.add( mktData);
+			buts.add( placeOrder);
+			buts.add( Box.createVerticalStrut(10));
+			buts.add( removeLegs);
+
+			JScrollPane legsScroll = new JScrollPane( m_legsTable);
+			legsScroll.setPreferredSize( new Dimension( 100, 1));
+			legsScroll.setBorder( new EmptyBorder( 0, 0, 0, 0));
+			
+			JPanel legsPanel = new JPanel();
+			legsPanel.setBorder( new TitledBorder( "Combo Legs"));
+			legsPanel.setLayout( new BorderLayout() );
+			legsPanel.add( legsScroll);
+			legsPanel.add( m_dnText, BorderLayout.SOUTH);
+
+			HorzPanel horzPanel = new HorzPanel();
+			horzPanel.setBorder( new TitledBorder( "Build Combo"));
+			horzPanel.add( m_contractPanel);
+			horzPanel.add( buts);
+			horzPanel.add( legsPanel);
+			horzPanel.add( m_dnPanel);
+
+			JScrollPane mktDataScroll = new JScrollPane( m_mktDataTable);
+			mktDataScroll.setBorder( new TitledBorder( "Combo Market Data"));
+
+			setLayout( new BorderLayout() );
+			add( horzPanel, BorderLayout.NORTH);
+			add( mktDataScroll);
+		}
+
+		protected void onAddLeg() {
+			m_contractPanel.onOK();
+			ApiDemo.INSTANCE.controller().reqContractDetails( m_contract, new IContractDetailsHandler() {
+				@Override public void contractDetails(ArrayList<NewContractDetails> list) {
+					for (NewContractDetails details : list) {
+						addLeg( details);
+					}
+				}
+			});
+		}
+
+		protected void onRemoveLeg() {
+			int[] indexes = m_legsTable.getSelectedRows();
+			for (int i = indexes.length - 1; i >= 0; i--) {
+				int index = indexes[i];
+				m_legRows.remove( index);
+			}
+			m_legsModel.fireTableDataChanged();
+		}
+
+		protected void onRemoveLegs() {
+			m_legRows.clear();
+			m_legsModel.fireTableDataChanged();
+		}
+
+		protected void addLeg(NewContractDetails contractDetails) {
+			NewContract c = contractDetails.contract();
+			NewComboLeg leg = new NewComboLeg();
+			leg.action( m_action.getSelectedItem() );
+			leg.ratio( m_ratio.getInt() );
+			leg.conid( c.conid() );
+			leg.exchange( c.exchange() );
+
+			LegRow row = new LegRow( c, leg);
+			m_legRows.add( row);
+			m_legsModel.fireTableDataChanged();
+		}
+
+		protected void onReqMktData() {
+			NewContract combo = getComboContractFromLegs();
+			if (combo != null) {
+				m_mktDataModel.addRow( getComboContractFromLegs() );
+			}
+		}
+
+		private NewContract getComboContractFromLegs() {
+			if (m_legRows.size() < 2) {
+				return null;
+			}
+
+			LegRow leg = m_legRows.get( 0);
+
+			NewContract comboContract = new NewContract();
+			comboContract.secType( SecType.BAG);
+			comboContract.currency( leg.m_contract.currency() );
+			comboContract.exchange( leg.m_contract.exchange() );
+			comboContract.symbol( comboContract.exchange().equals( "SMART")
+					? leg.m_contract.currency()
+							: leg.m_contract.symbol() );
+
+			for (LegRow row : m_legRows) {
+				comboContract.comboLegs().add( row.m_leg);
+			}
+			
+			if (m_dnContract != null) {
+				comboContract.underComp( m_dnContract);
+			}
+
+			return comboContract;
+		}
+
+		protected void onPlaceOrder() {
+			NewOrder o = new NewOrder();
+			o.totalQuantity( 1);
+
+			NewContract c = getComboContractFromLegs();
+			TicketDlg dlg = new TicketDlg( c, o);
+			dlg.setVisible( true);
+		}
+
+		class ComboContractPanel extends ContractPanel {
+			ComboContractPanel() {
+				super( m_contract);
+				removeAll();
+
+				VerticalPanel p1 = new VerticalPanel();
+				p1.setAlignmentY(0);
+				p1.add( "Action", m_action);
+				p1.add( "Ratio", m_ratio);
+				p1.add( "Symbol", m_symbol);
+				p1.add( "Sec type", m_secType);
+				p1.add( "Expiry", m_expiry);
+				p1.add( "Strike", m_strike);
+
+				VerticalPanel p2 = new VerticalPanel();
+				p2.setAlignmentY(0);
+				p2.add( "Put/call", m_right);
+				p2.add( "Multiplier", m_multiplier);
+				p2.add( "Exchange", m_exchange);
+				p2.add( "Currency", m_currency);
+				p2.add( "Local symbol", m_localSymbol);
+
+				setLayout( new BoxLayout( this, BoxLayout.X_AXIS) );
+				add( p1);
+				add( p2);
+			}
+		}
+		
+		class DnPanel extends VerticalPanel {
+			UpperField m_symbol = new UpperField();
+			TCombo<SecType> m_secType = new TCombo<SecType>( SecType.values() );
+			UpperField m_expiry = new UpperField();
+			UpperField m_exchange = new UpperField();
+			UpperField m_currency = new UpperField();
+			UpperField m_delta = new UpperField();
+			UpperField m_price = new UpperField();
+
+			DnPanel() {
+				HtmlButton but = new HtmlButton( "Set") {
+					@Override protected void actionPerformed() {
+						onAdd();
+					}
+				};
+
+				setBorder( new TitledBorder( "Delta-Neutral"));
+		    	add( "Symbol", m_symbol);
+		    	add( "Sec type", m_secType);
+		    	add( "Expiry", m_expiry);
+		    	add( "Exchange", m_exchange, but);
+		    	add( "Currency", m_currency);
+				add( "Delta", m_delta);
+				add( "Price", m_price);
+			}
+
+			protected void onAdd() {
+				NewContract dn = new NewContract();
+				dn.symbol( m_symbol.getText().toUpperCase() ); 
+				dn.secType( m_secType.getSelectedItem() ); 
+				dn.expiry( m_expiry.getText() ); 
+				dn.exchange( m_exchange.getText().toUpperCase() ); 
+				dn.currency( m_currency.getText().toUpperCase() ); 
+				
+				ApiDemo.INSTANCE.controller().reqContractDetails(dn, new IContractDetailsHandler() {
+					@Override public void contractDetails(ArrayList<NewContractDetails> list) {
+						if (list.size() == 1) {
+							NewContract c = list.get( 0).contract();
+							m_dnContract = new DeltaNeutralContract( c.conid(), m_delta.getDouble(), m_price.getDouble() );
+							m_dnText.setText( String.format( "Delta-neutral: %s Delta: %s  Price: %s", c.description(), m_delta.getText(), m_price.getText() ) );
+						}
+						else {
+							ApiDemo.INSTANCE.show( "DN description does not define a uniqe contract");
+							m_dnContract = null;
+							m_dnText.setText( null);
+						}
+					}
+				});
+			}
+		}
+	}
+
+	static class EfpPanel extends JPanel {
+		private final UpperField m_symbol = new UpperField( "IBM");
+		private final UpperField m_futExch = new UpperField( "ONE");
+		private final UpperField m_expiry = new UpperField( "201309");
+		private final UpperField m_stkExch = new UpperField( "SMART");
+		private final ArrayList<LegRow> m_legRows = new ArrayList<LegRow>();
+		private final LegModel m_legsModel = new LegModel( m_legRows);
+		private final JTable m_legsTable = new JTable( m_legsModel);
+		private final EfpModel m_efpModel = new EfpModel();
+		private final JCheckBox m_divProt = new JCheckBox();
+
+		EfpPanel() {
+			HtmlButton addLeg = new HtmlButton( "Create EFP") {
+				@Override protected void actionPerformed() {
+					onCreateEfp();
+				}
+			};
+
+			HtmlButton mktData = new HtmlButton( "Request Market Data") {
+				@Override protected void actionPerformed() {
+					onReqMktData();
+				}
+			};
+
+			HtmlButton placeOrder = new HtmlButton( "Place Order") {
+				@Override protected void actionPerformed() {
+					onPlaceOrder();
+				}
+			};
+
+			VerticalPanel params = new VerticalPanel();
+			params.add( "Symbol", m_symbol);
+			params.add( "Futures exchange", m_futExch);
+			params.add( "Expiry", m_expiry);
+			params.add( "Stock exchange", m_stkExch);
+			params.add( "Dividend protected", m_divProt);
+
+			VerticalPanel buts = new VerticalPanel();
+			buts.add( addLeg);
+			buts.add( mktData);
+			buts.add( placeOrder);
+
+			JScrollPane legsScroll = new JScrollPane( m_legsTable);
+			legsScroll.setPreferredSize( new Dimension( 100, 1));
+			legsScroll.setBorder( new TitledBorder( "Combo Legs"));
+
+			HorzPanel horzPanel = new HorzPanel();
+			horzPanel.setBorder( new TitledBorder( "Build Combo"));
+			horzPanel.add( params);
+			horzPanel.add( buts);
+			horzPanel.add( legsScroll);
+
+			JTable efpTable = new JTable( m_efpModel);
+			JScrollPane efpScroll = new JScrollPane( efpTable);
+			efpScroll.setBorder( new TitledBorder( "EFP Market Data"));
+
+			setLayout( new BorderLayout() );
+			add( horzPanel, BorderLayout.NORTH);
+			add( efpScroll);
+		}
+
+		protected void onCreateEfp() {
+			m_legRows.clear();
+			m_legsModel.fireTableDataChanged();
+
+			NewContract fut = new NewContract();
+			fut.symbol( m_symbol.getText() );
+			fut.secType( SecType.FUT);
+			fut.exchange( m_futExch.getText() );
+			fut.expiry( m_expiry.getText() );
+			fut.currency( "USD");
+			
+			ApiDemo.INSTANCE.controller().reqContractDetails( fut, new IContractDetailsHandler() {
+				@Override public void contractDetails(ArrayList<NewContractDetails> list) {
+					// if two futures are returned, assume that the first is is no div prot and the 
+					// second one is div prot; unfortunately TWS does not send down the div prot flag
+					if (list.size() == 2) {
+						int i = m_divProt.isSelected() ? 1 : 0;
+						addFutLeg( list.get( i) );
+					}
+					else if (list.size() != 1) {
+						ApiDemo.INSTANCE.show( "Request does not define a valid unique futures contract");
+					}
+					else {
+						addFutLeg( list.get( 0) );
+					}
+				}
+				void addFutLeg(NewContractDetails details) {
+					addLeg( details.contract(), Action.BUY, 1);
+				};
+			});
+
+			NewContract stk = new NewContract();
+			stk.symbol( m_symbol.getText() );
+			stk.secType( SecType.STK);
+			stk.exchange( m_stkExch.getText() );
+			stk.currency( "USD");
+			
+			ApiDemo.INSTANCE.controller().reqContractDetails( stk, new IContractDetailsHandler() {
+				@Override public void contractDetails(ArrayList<NewContractDetails> list) {
+					for (NewContractDetails data : list) {
+						addLeg( data.contract(), Action.SELL, 100);
+					}
+				}
+			});
+		}
+		
+		protected void addLeg(NewContract contract, Action action, int ratio) {
+			NewComboLeg leg = new NewComboLeg();
+			leg.action( action);
+			leg.ratio( ratio);
+			leg.conid( contract.conid() );
+			leg.exchange( contract.exchange() );
+
+			LegRow row = new LegRow( contract, leg);
+			m_legRows.add( row);
+			m_legsModel.fireTableDataChanged();
+		}
+
+		protected void onRemoveLeg() {
+			int i = m_legsTable.getSelectedRow();
+			if (i != -1) {
+				m_legRows.remove( i);
+				m_legsModel.fireTableDataChanged();
+			}
+		}
+
+		protected void onReqMktData() {
+			m_efpModel.addRow( getComboContractFromLegs() );
+		}
+
+		private NewContract getComboContractFromLegs() {
+			if (m_legRows.size() < 2) {
+				return null;
+			}
+
+			LegRow leg = m_legRows.get( 0);
+
+			NewContract comboContract = new NewContract();
+			comboContract.secType( SecType.BAG);
+			comboContract.currency( leg.m_contract.currency() );
+			comboContract.exchange( "SMART");
+			comboContract.symbol( "USD");
+
+			for (LegRow row : m_legRows) {
+				comboContract.comboLegs().add( row.m_leg);
+			}
+
+			return comboContract;
+		}
+
+		protected void onPlaceOrder() {
+			NewOrder o = new NewOrder();
+			o.totalQuantity( 1);
+
+			NewContract c = getComboContractFromLegs();
+			TicketDlg dlg = new TicketDlg( c, o);
+			dlg.setVisible( true);
+		}
+
+		static class EfpModel extends AbstractTableModel {
+			ArrayList<EfpRow> m_rows = new ArrayList<EfpRow>();
+
+			void addRow(NewContract contract) {
+				EfpRow row = new EfpRow( this, contract.description() );
+				m_rows.add( row);
+				ApiDemo.INSTANCE.controller().reqEfpMktData( contract, "", false, row);
+				fireTableRowsInserted( m_rows.size() - 1, m_rows.size() - 1);
+			}
+
+			@Override public int getRowCount() {
+				return m_rows.size();
+			}
+
+			@Override public int getColumnCount() {
+				return 10;
+			}
+
+			@Override public String getColumnName(int col) {
+				switch( col) {
+					case 0: return "Description";
+					case 1: return "Bid";
+					case 2: return "Ask";
+					case 3: return "Basis Points";
+					case 4: return "Formatted";
+					case 5: return "Implied Future";
+					case 6: return "Hold Days";
+					case 7: return "Future Expiry";
+					case 8: return "Dividend Impact";
+					case 9: return "Dividends to Expiry";
+					default: return null;
+				}
+			}
+
+			@Override public Object getValueAt(int rowIn, int col) {
+				EfpRow row = m_rows.get( rowIn);
+
+				switch( col) {
+					case 0: return row.m_description;
+					case 1: return row.m_bid;
+					case 2: return row.m_ask;
+					case 3: return row.m_basisPoints;
+					case 4: return row.m_formattedBasisPoints;
+					case 5: return row.m_impliedFuture;
+					case 6: return row.m_holdDays;
+					case 7: return row.m_futureExpiry;
+					case 8: return row.m_dividendImpact;
+					case 9: return row.m_dividendsToExpiry;
+					default: return null;
+				}
+			}
+
+			class EfpRow extends TopRow implements IEfpHandler {
+				double m_basisPoints;
+				String m_formattedBasisPoints;
+				double m_impliedFuture;
+				int m_holdDays;
+				String m_futureExpiry;
+				double m_dividendImpact;
+				double m_dividendsToExpiry;
+				
+				EfpRow(AbstractTableModel model, String description) {
+					super(model, description);
+				}
+
+				@Override public void tickEFP(int tickType, double basisPoints, String formattedBasisPoints, double impliedFuture, int holdDays, String futureExpiry, double dividendImpact, double dividendsToExpiry) {
+					m_basisPoints = basisPoints;
+					m_formattedBasisPoints = formattedBasisPoints;
+					m_impliedFuture = impliedFuture;
+					m_holdDays = holdDays;
+					m_futureExpiry = futureExpiry;
+					m_dividendImpact = dividendImpact;
+					m_dividendsToExpiry = dividendsToExpiry;
+
+					m_model.fireTableDataChanged();
+				}
+			}
+		}
+	}
+
+	static class LegRow {
+		NewContract m_contract;
+		NewComboLeg m_leg = new NewComboLeg();
+
+		public LegRow(NewContract c, NewComboLeg leg) {
+			m_contract = c;
+			m_leg = leg;
+		}
+	}
+
+	static class LegModel extends AbstractTableModel {
+		ArrayList<LegRow> m_legRows;
+
+		LegModel( ArrayList<LegRow> legRows) {
+			m_legRows = legRows;
+		}
+
+		@Override public int getRowCount() {
+			return m_legRows.size();
+		}
+
+		@Override public int getColumnCount() {
+			return 3;
+		}
+
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Action";
+				case 1: return "Ratio";
+				case 2: return "Description";
+				default: return null;
+			}
+		}
+
+		@Override public Object getValueAt(int rowIn, int col) {
+			LegRow row = m_legRows.get( rowIn);
+			switch( col) {
+				case 0: return row.m_leg.action();
+				case 1: return row.m_leg.ratio();
+				case 2: return row.m_contract.description();
+				default: return null;
+			}
+		}
+	}
+	
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/ContractDlg.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.event.KeyEvent;
+import java.awt.event.KeyListener;
+
+import javax.swing.JDialog;
+import javax.swing.JFrame;
+import javax.swing.SwingConstants;
+
+
+import apidemo.util.HtmlButton;
+
+import com.ib.controller.NewContract;
+
+class ContractDlg extends JDialog {
+	ContractPanel m_contractPanel;
+    
+    ContractDlg( JFrame f, NewContract c) {
+    	super( f, true);
+    	
+    	m_contractPanel = new ContractPanel( c);
+    	
+    	setLayout( new BorderLayout() );
+    	
+    	
+    	HtmlButton ok = new HtmlButton( "OK") {
+			@Override public void actionPerformed() {
+				onOK();
+			}
+		};
+		ok.setHorizontalAlignment(SwingConstants.CENTER);
+
+		m_contractPanel.addKeyListener( new KeyListener() {
+			@Override public void keyTyped(KeyEvent e) {
+				System.out.println( "lkj");
+			}
+			
+			@Override public void keyReleased(KeyEvent e) {
+			}
+			
+			@Override public void keyPressed(KeyEvent e) {
+			}
+		});
+    	
+    	add( m_contractPanel);
+    	add( ok, BorderLayout.SOUTH);
+    	pack();
+    }
+
+	private void onOK() {
+		m_contractPanel.onOK();
+		setVisible( false);
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/ContractInfoPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.Desktop;
+import java.io.File;
+import java.io.FileWriter;
+import java.util.ArrayList;
+
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
+
+import apidemo.util.HtmlButton;
+import apidemo.util.NewTabbedPanel;
+import apidemo.util.NewTabbedPanel.INewTab;
+import apidemo.util.TCombo;
+import apidemo.util.VerticalPanel;
+
+import com.ib.controller.ApiController.IContractDetailsHandler;
+import com.ib.controller.ApiController.IFundamentalsHandler;
+import com.ib.controller.NewContract;
+import com.ib.controller.NewContractDetails;
+import com.ib.controller.Types.FundamentalType;
+
+public class ContractInfoPanel extends JPanel {
+	private final NewContract m_contract = new NewContract();
+	private final NewTabbedPanel m_requestPanels = new NewTabbedPanel();
+	private final NewTabbedPanel m_resultsPanels = new NewTabbedPanel();
+	
+	ContractInfoPanel() {
+		m_requestPanels.addTab( "Contract details", new DetailsRequestPanel() );
+		m_requestPanels.addTab( "Fundamentals", new FundaRequestPanel() );
+		
+		setLayout( new BorderLayout() );
+		add( m_requestPanels, BorderLayout.NORTH);
+		add( m_resultsPanels);
+	}
+	
+	class DetailsRequestPanel extends JPanel {
+		ContractPanel m_contractPanel = new ContractPanel( m_contract);
+		
+		DetailsRequestPanel() {
+			HtmlButton but = new HtmlButton( "Query") {
+				@Override protected void actionPerformed() {
+					onQuery();
+				}
+			};
+
+			setLayout( new BoxLayout( this, BoxLayout.X_AXIS) );
+			add( m_contractPanel);
+			add( Box.createHorizontalStrut(20));
+			add( but);
+		}
+		
+		protected void onQuery() {
+			m_contractPanel.onOK();
+			
+			DetailsResultsPanel panel = new DetailsResultsPanel();
+			m_resultsPanels.addTab( m_contract.symbol() + " " + "Description", panel, true, true);
+			ApiDemo.INSTANCE.controller().reqContractDetails(m_contract, panel);
+		}
+	}
+
+	class DetailsResultsPanel extends JPanel implements IContractDetailsHandler {
+		JLabel m_label = new JLabel();
+		JTextArea m_text = new JTextArea();
+		
+		DetailsResultsPanel() {
+			JScrollPane scroll = new JScrollPane( m_text);
+
+			setLayout( new BorderLayout() );
+			add( m_label, BorderLayout.NORTH);
+			add( scroll);
+		}
+
+		@Override public void contractDetails(ArrayList<NewContractDetails> list) {
+			// set label
+			if (list.size() == 0) {
+				m_label.setText( "No matching contracts were found");
+			}
+			else if (list.size() > 1) {
+				m_label.setText( list.size() + " contracts returned; showing first contract only");
+			}
+			else {
+				m_label.setText( null);
+			}
+			
+			// set text
+			if (list.size() == 0) {
+				m_text.setText( null);
+			}
+			else {
+				m_text.setText( list.get( 0).toString() );
+			}
+		}
+	}
+	
+	public class FundaRequestPanel extends JPanel {
+		ContractPanel m_contractPanel = new ContractPanel( m_contract);
+		TCombo<FundamentalType> m_type = new TCombo<FundamentalType>( FundamentalType.values() );
+		
+		FundaRequestPanel() {
+			HtmlButton but = new HtmlButton( "Query") {
+				@Override protected void actionPerformed() {
+					onQuery();
+				}
+			};
+			
+			VerticalPanel rightPanel = new VerticalPanel();
+			rightPanel.add( "Report type", m_type);
+			
+			setLayout( new BoxLayout( this, BoxLayout.X_AXIS));
+			add( m_contractPanel);
+			add( Box.createHorizontalStrut(20));
+			add( rightPanel);
+			add( Box.createHorizontalStrut(10));
+			add( but);
+		}
+		
+		protected void onQuery() {
+			m_contractPanel.onOK();
+			FundaResultPanel panel = new FundaResultPanel();
+			FundamentalType type = m_type.getSelectedItem();
+			m_resultsPanels.addTab( m_contract.symbol() + " " + type, panel, true, true);
+			ApiDemo.INSTANCE.controller().reqFundamentals( m_contract, type, panel); 
+		}
+	}	
+	
+	class FundaResultPanel extends JPanel implements INewTab, IFundamentalsHandler {
+		String m_data;
+		JTextArea m_text = new JTextArea();
+
+		FundaResultPanel() {
+			HtmlButton b = new HtmlButton( "View in browser") {
+				@Override protected void actionPerformed() {
+					onView();
+				}
+			};
+
+			JScrollPane scroll = new JScrollPane( m_text);
+			setLayout( new BorderLayout() );
+			add( scroll);
+			add( b, BorderLayout.EAST);
+		}
+
+		protected void onView() {
+			try {
+				File file = File.createTempFile( "tws", ".xml");
+				FileWriter writer = new FileWriter( file);
+				writer.write( m_text.getText() );
+				writer.flush();
+				writer.close();
+				Desktop.getDesktop().open( file);
+			}
+			catch( Exception e) {
+				e.printStackTrace();
+			}
+		}
+
+		/** Called when the tab is first visited. */
+		@Override public void activated() {
+			ApiDemo.INSTANCE.controller().reqFundamentals(m_contract, FundamentalType.ReportRatios, this);
+		}
+		
+		/** Called when the tab is closed by clicking the X. */
+		@Override public void closed() {
+		}
+
+		@Override public void fundamentals(String str) {
+			m_data = str;
+			m_text.setText( str);
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/ContractPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+
+import javax.swing.JPanel;
+
+import apidemo.util.TCombo;
+import apidemo.util.UpperField;
+import apidemo.util.VerticalPanel;
+
+import com.ib.controller.NewContract;
+import com.ib.controller.Types.Right;
+import com.ib.controller.Types.SecType;
+
+public class ContractPanel extends JPanel {
+	protected UpperField m_symbol = new UpperField();
+	protected TCombo<SecType> m_secType = new TCombo<SecType>( SecType.values() );
+	protected UpperField m_expiry = new UpperField();
+	protected UpperField m_strike = new UpperField();
+	protected TCombo<Right> m_right = new TCombo<Right>( Right.values() );
+	protected UpperField m_multiplier = new UpperField();
+	protected UpperField m_exchange = new UpperField();
+	protected UpperField m_compExch = new UpperField();
+	protected UpperField m_currency = new UpperField();
+	protected UpperField m_localSymbol = new UpperField();
+	protected UpperField m_tradingClass = new UpperField();
+
+	private NewContract m_contract;
+
+	ContractPanel(NewContract c) {
+		m_contract = c;
+
+		if (c.secType() == SecType.None) {
+			m_symbol.setText( "IBM");
+			m_secType.setSelectedItem( SecType.STK);
+			m_exchange.setText( "SMART");
+			m_compExch.setText( "ISLAND");
+			m_currency.setText( "USD");
+		}
+		else {
+			m_symbol.setText( m_contract.symbol());
+			m_secType.setSelectedItem( m_contract.secType() );
+			m_expiry.setText( m_contract.expiry());
+			m_strike.setText( "" + m_contract.strike() );
+			m_right.setSelectedItem( m_contract.right() ); 
+			m_multiplier.setText( m_contract.multiplier() );
+			m_exchange.setText( m_contract.exchange());
+			m_compExch.setText( m_contract.primaryExch() );
+			m_currency.setText( m_contract.currency());
+			m_localSymbol.setText( m_contract.localSymbol());
+			m_tradingClass.setText( m_contract.tradingClass() );
+		}
+		
+		VerticalPanel p = new VerticalPanel();
+    	p.add( "Symbol", m_symbol);
+    	p.add( "Sec type", m_secType);
+    	p.add( "Expiry", m_expiry);
+    	p.add( "Strike", m_strike);
+    	p.add( "Put/call", m_right);
+    	p.add( "Multiplier", m_multiplier);
+    	p.add( "Exchange", m_exchange);
+    	p.add( "Comp. Exch.", m_compExch);
+    	p.add( "Currency", m_currency);
+    	p.add( "Local symbol", m_localSymbol);
+    	p.add( "Trading class", m_tradingClass);
+    	
+    	setLayout( new BorderLayout() );
+    	add( p);
+	}
+	
+	@Override public Dimension getMaximumSize() {
+		return super.getPreferredSize();
+	}
+	
+	public void onOK() {
+		if (m_contract.isCombo() ) {
+			return;
+		}
+		
+		// component exchange is only relevant if exchange is SMART or BEST
+		String exch = m_exchange.getText().toUpperCase(); 
+		String compExch = exch.equals( "SMART") || exch.equals( "BEST") ? m_compExch.getText().toUpperCase() : null; 		
+		
+		m_contract.symbol( m_symbol.getText().toUpperCase() ); 
+		m_contract.secType( m_secType.getSelectedItem() ); 
+		m_contract.expiry( m_expiry.getText() ); 
+		m_contract.strike( m_strike.getDouble() ); 
+		m_contract.right( m_right.getSelectedItem() ); 
+		m_contract.multiplier( m_multiplier.getText() ); 
+		m_contract.exchange( exch);
+		m_contract.primaryExch( compExch);
+		m_contract.currency( m_currency.getText().toUpperCase() ); 
+		m_contract.localSymbol( m_localSymbol.getText().toUpperCase() );
+		m_contract.tradingClass( m_tradingClass.getText().toUpperCase() );
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/ExercisePanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import javax.swing.BoxLayout;
+import javax.swing.DefaultListModel;
+import javax.swing.JCheckBox;
+import javax.swing.JList;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.border.TitledBorder;
+import javax.swing.event.ListSelectionEvent;
+import javax.swing.event.ListSelectionListener;
+
+
+import apidemo.AccountInfoPanel.PortfolioModel;
+import apidemo.util.HtmlButton;
+import apidemo.util.TCombo;
+import apidemo.util.UpperField;
+import apidemo.util.VerticalPanel;
+import apidemo.util.NewTabbedPanel.INewTab;
+import apidemo.util.VerticalPanel.HorzPanel;
+
+import com.ib.controller.Position;
+import com.ib.controller.ApiController.IAccountHandler;
+import com.ib.controller.Types.ExerciseType;
+import com.ib.controller.Types.SecType;
+
+
+public class ExercisePanel extends HorzPanel implements INewTab, IAccountHandler {
+	private DefaultListModel m_acctList = new DefaultListModel();
+	private JList m_accounts = new JList( m_acctList);
+	private String m_selAcct = "";
+	private PortfolioModel m_portfolioModel = new PortfolioModel();
+	private JTable m_portTable = new JTable( m_portfolioModel);
+	
+	ExercisePanel() {
+		JScrollPane acctsScroll = new JScrollPane( m_accounts);
+		acctsScroll.setBorder( new TitledBorder( "Select account"));
+		
+		JScrollPane portScroll = new JScrollPane( m_portTable);
+		portScroll.setBorder( new TitledBorder( "Select long option position"));
+		
+		setLayout( new BoxLayout( this, BoxLayout.X_AXIS) );
+		add( acctsScroll);
+		add( portScroll);
+		add( new ExPanel() );
+
+		m_accounts.addListSelectionListener( new ListSelectionListener() {
+			@Override public void valueChanged(ListSelectionEvent e) {
+				onAcctChanged();
+			}
+		});
+	}
+	
+	protected void onAcctChanged() {
+		int i = m_accounts.getSelectedIndex();
+		if (i != -1) {
+			String selAcct = (String)m_acctList.get( i);
+			if (!selAcct.equals( m_selAcct) ) {
+				m_selAcct = selAcct;
+				m_portfolioModel.clear();
+				ApiDemo.INSTANCE.controller().reqAccountUpdates(true, m_selAcct, this);
+			}
+		}
+	}
+
+	class ExPanel extends VerticalPanel {
+		TCombo<ExerciseType> m_combo = new TCombo<ExerciseType>( ExerciseType.values() );
+		UpperField m_qty = new UpperField( "1");
+		JCheckBox m_override = new JCheckBox();
+		
+		ExPanel() {
+			HtmlButton but = new HtmlButton( "Go") {
+				protected void actionPerformed() {
+					onExercise();
+				}
+			};
+			
+			m_combo.removeItem( ExerciseType.None);
+			
+			add( "Action", m_combo);
+			add( "Quantity", m_qty);
+			add( "Override", m_override);
+			add( but);
+		}
+
+		protected void onExercise() {
+			String account = (String)m_accounts.getSelectedValue();
+			int i = m_portTable.getSelectedRow();
+			if (i != -1 && account != null) {
+				Position position = m_portfolioModel.getPosition( i);
+				ApiDemo.INSTANCE.controller().exerciseOption(account, position.contract(), m_combo.getSelectedItem(), m_qty.getInt(), m_override.isSelected() );
+			}
+		}
+	}
+
+	/** Show long option positions only. */
+	@Override public void updatePortfolio(Position position) {
+		if (position.account().equals( m_selAcct) && position.contract().secType() == SecType.OPT) {		
+			m_portfolioModel.update( position);
+		}
+	}
+		
+	/** Called when the tab is first visited. */
+	@Override public void activated() {
+		for (String account : ApiDemo.INSTANCE.accountList() ) {
+			m_acctList.addElement( account);
+		}
+	}
+	
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+	}
+
+	@Override public void accountValue(String account, String key, String value, String currency) {
+	}
+
+	@Override public void accountTime(String timeStamp) {
+	}
+
+	@Override public void accountDownloadEnd(String account) {
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/MarketDataPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.Desktop;
+import java.awt.Dimension;
+import java.awt.GridLayout;
+import java.io.File;
+import java.io.FileWriter;
+import java.util.ArrayList;
+import java.util.HashSet;
+
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JCheckBox;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.SwingUtilities;
+import javax.swing.table.AbstractTableModel;
+import javax.swing.table.TableCellRenderer;
+
+
+import apidemo.util.HtmlButton;
+import apidemo.util.NewTabbedPanel;
+import apidemo.util.TCombo;
+import apidemo.util.UpperField;
+import apidemo.util.VerticalPanel;
+import apidemo.util.NewTabbedPanel.NewTabPanel;
+import apidemo.util.VerticalPanel.StackPanel;
+
+import com.ib.client.ScannerSubscription;
+import com.ib.controller.Bar;
+import com.ib.controller.Instrument;
+import com.ib.controller.NewContract;
+import com.ib.controller.NewContractDetails;
+import com.ib.controller.ScanCode;
+import com.ib.controller.ApiController.IDeepMktDataHandler;
+import com.ib.controller.ApiController.IHistoricalDataHandler;
+import com.ib.controller.ApiController.IRealTimeBarHandler;
+import com.ib.controller.ApiController.IScannerHandler;
+import com.ib.controller.Types.BarSize;
+import com.ib.controller.Types.DeepSide;
+import com.ib.controller.Types.DeepType;
+import com.ib.controller.Types.DurationUnit;
+import com.ib.controller.Types.MktDataType;
+import com.ib.controller.Types.WhatToShow;
+
+public class MarketDataPanel extends JPanel {
+	private final NewContract m_contract = new NewContract();
+	private final NewTabbedPanel m_requestPanel = new NewTabbedPanel();
+	private final NewTabbedPanel m_resultsPanel = new NewTabbedPanel();
+	private TopResultsPanel m_topResultPanel;
+	
+	MarketDataPanel() {
+		m_requestPanel.addTab( "Top Market Data", new TopRequestPanel() );
+		m_requestPanel.addTab( "Deep Book", new DeepRequestPanel() );
+		m_requestPanel.addTab( "Historical Data", new HistRequestPanel() );
+		m_requestPanel.addTab( "Real-time Bars", new RealtimeRequestPanel() );
+		m_requestPanel.addTab( "Market Scanner", new ScannerRequestPanel() );
+		
+		setLayout( new BorderLayout() );
+		add( m_requestPanel, BorderLayout.NORTH);
+		add( m_resultsPanel);
+	}
+	
+	private class TopRequestPanel extends JPanel {
+		final ContractPanel m_contractPanel = new ContractPanel(m_contract);
+		
+		TopRequestPanel() {
+			HtmlButton reqTop = new HtmlButton( "Request Top Market Data") {
+				@Override protected void actionPerformed() {
+					onTop();
+				}
+			};
+			
+			VerticalPanel butPanel = new VerticalPanel();
+			butPanel.add( reqTop);
+			
+			setLayout( new BoxLayout( this, BoxLayout.X_AXIS) );
+			add( m_contractPanel);
+			add( Box.createHorizontalStrut(20));
+			add( butPanel);
+		}
+
+		protected void onTop() {
+			m_contractPanel.onOK();
+			if (m_topResultPanel == null) {
+				m_topResultPanel = new TopResultsPanel();
+				m_resultsPanel.addTab( "Top Data", m_topResultPanel, true, true);
+			}
+			
+			m_topResultPanel.m_model.addRow( m_contract);
+		}
+	}
+	
+	private class TopResultsPanel extends NewTabPanel {
+		final TopModel m_model = new TopModel();
+		final JTable m_tab = new TopTable( m_model);
+		final TCombo<MktDataType> m_typeCombo = new TCombo<MktDataType>( MktDataType.values() );
+
+		TopResultsPanel() {
+			m_typeCombo.removeItemAt( 0);
+
+			JScrollPane scroll = new JScrollPane( m_tab);
+
+			HtmlButton reqType = new HtmlButton( "Go") {
+				@Override protected void actionPerformed() {
+					onReqType();
+				}
+			};
+
+			VerticalPanel butPanel = new VerticalPanel();
+			butPanel.add( "Market data type", m_typeCombo, reqType);
+			
+			setLayout( new BorderLayout() );
+			add( scroll);
+			add( butPanel, BorderLayout.SOUTH);
+		}
+		
+		/** Called when the tab is first visited. */
+		@Override public void activated() {
+		}
+
+		/** Called when the tab is closed by clicking the X. */
+		@Override public void closed() {
+			m_model.desubscribe();
+			m_topResultPanel = null;
+		}
+
+		void onReqType() {
+			ApiDemo.INSTANCE.controller().reqMktDataType( m_typeCombo.getSelectedItem() );
+		}
+		
+		class TopTable extends JTable {
+			public TopTable(TopModel model) { super( model); }
+
+			@Override public TableCellRenderer getCellRenderer(int rowIn, int column) {
+				TableCellRenderer rend = super.getCellRenderer(rowIn, column);
+				m_model.color( rend, rowIn, getForeground() );
+				return rend;
+			}
+		}
+	}		
+	
+	private class DeepRequestPanel extends JPanel {
+		final ContractPanel m_contractPanel = new ContractPanel(m_contract);
+		
+		DeepRequestPanel() {
+			HtmlButton reqDeep = new HtmlButton( "Request Deep Market Data") {
+				@Override protected void actionPerformed() {
+					onDeep();
+				}
+			};
+			
+			VerticalPanel butPanel = new VerticalPanel();
+			butPanel.add( reqDeep);
+			
+			setLayout( new BoxLayout( this, BoxLayout.X_AXIS) );
+			add( m_contractPanel);
+			add( Box.createHorizontalStrut(20));
+			add( butPanel);
+		}
+
+		protected void onDeep() {
+			m_contractPanel.onOK();
+			DeepResultsPanel resultPanel = new DeepResultsPanel();
+			m_resultsPanel.addTab( "Deep " + m_contract.symbol(), resultPanel, true, true);
+			ApiDemo.INSTANCE.controller().reqDeepMktData(m_contract, 6, resultPanel);
+		}
+	}
+
+	private static class DeepResultsPanel extends NewTabPanel implements IDeepMktDataHandler {
+		final DeepModel m_buy = new DeepModel();
+		final DeepModel m_sell = new DeepModel();
+
+		DeepResultsPanel() {
+			HtmlButton desub = new HtmlButton( "Desubscribe") {
+				public void actionPerformed() {
+					onDesub();
+				}
+			};
+			
+			JTable buyTab = new JTable( m_buy);
+			JTable sellTab = new JTable( m_sell);
+			
+			JScrollPane buyScroll = new JScrollPane( buyTab);
+			JScrollPane sellScroll = new JScrollPane( sellTab);
+			
+			JPanel mid = new JPanel( new GridLayout( 1, 2) );
+			mid.add( buyScroll);
+			mid.add( sellScroll);
+			
+			setLayout( new BorderLayout() );
+			add( mid);
+			add( desub, BorderLayout.SOUTH);
+		}
+		
+		protected void onDesub() {
+			ApiDemo.INSTANCE.controller().cancelDeepMktData( this);
+		}
+
+		@Override public void activated() {
+		}
+
+		/** Called when the tab is closed by clicking the X. */
+		@Override public void closed() {
+			ApiDemo.INSTANCE.controller().cancelDeepMktData( this);
+		}
+		
+		@Override public void updateMktDepth(int pos, String mm, DeepType operation, DeepSide side, double price, int size) {
+			if (side == DeepSide.BUY) {
+				m_buy.updateMktDepth(pos, mm, operation, price, size);
+			}
+			else {
+				m_sell.updateMktDepth(pos, mm, operation, price, size);
+			}
+		}
+
+		class DeepModel extends AbstractTableModel {
+			final ArrayList<DeepRow> m_rows = new ArrayList<DeepRow>();
+
+			@Override public int getRowCount() {
+				return m_rows.size();
+			}
+
+			public void updateMktDepth(int pos, String mm, DeepType operation, double price, int size) {
+				switch( operation) {
+					case INSERT:
+						m_rows.add( pos, new DeepRow( mm, price, size) );
+						fireTableRowsInserted(pos, pos);
+						break;
+					case UPDATE:
+						m_rows.get( pos).update( mm, price, size);
+						fireTableRowsUpdated(pos, pos);
+						break;
+					case DELETE:
+						if (pos < m_rows.size() ) {
+							m_rows.remove( pos);
+						}
+						else {
+							// this happens but seems to be harmless
+							// System.out.println( "can't remove " + pos);
+						}
+						fireTableRowsDeleted(pos, pos);
+						break;
+				}
+			}
+
+			@Override public int getColumnCount() {
+				return 3;
+			}
+			
+			@Override public String getColumnName(int col) {
+				switch( col) {
+					case 0: return "Mkt Maker";
+					case 1: return "Price";
+					case 2: return "Size";
+					default: return null;
+				}
+			}
+
+			@Override public Object getValueAt(int rowIn, int col) {
+				DeepRow row = m_rows.get( rowIn);
+				
+				switch( col) {
+					case 0: return row.m_mm;
+					case 1: return row.m_price;
+					case 2: return row.m_size;
+					default: return null;
+				}
+			}
+		}
+		
+		static class DeepRow {
+			String m_mm;
+			double m_price;
+			int m_size;
+
+			public DeepRow(String mm, double price, int size) {
+				update( mm, price, size);
+			}
+			
+			void update( String mm, double price, int size) {
+				m_mm = mm;
+				m_price = price;
+				m_size = size;
+			}
+		}
+	}
+
+	private class HistRequestPanel extends JPanel {
+		final ContractPanel m_contractPanel = new ContractPanel(m_contract);
+		final UpperField m_end = new UpperField();
+		final UpperField m_duration = new UpperField();
+		final TCombo<DurationUnit> m_durationUnit = new TCombo<DurationUnit>( DurationUnit.values() );
+		final TCombo<BarSize> m_barSize = new TCombo<BarSize>( BarSize.values() );
+		final TCombo<WhatToShow> m_whatToShow = new TCombo<WhatToShow>( WhatToShow.values() );
+		final JCheckBox m_rthOnly = new JCheckBox();
+		
+		HistRequestPanel() { 		
+			m_end.setText( "20120101 12:00:00");
+			m_duration.setText( "1");
+			m_durationUnit.setSelectedItem( DurationUnit.WEEK);
+			m_barSize.setSelectedItem( BarSize._1_hour);
+			
+			HtmlButton button = new HtmlButton( "Request historical data") {
+				@Override protected void actionPerformed() {
+					onHistorical();
+				}
+			};
+			
+	    	VerticalPanel paramPanel = new VerticalPanel();
+			paramPanel.add( "End", m_end);
+			paramPanel.add( "Duration", m_duration);
+			paramPanel.add( "Duration unit", m_durationUnit);
+			paramPanel.add( "Bar size", m_barSize);
+			paramPanel.add( "What to show", m_whatToShow);
+			paramPanel.add( "RTH only", m_rthOnly);
+			
+			VerticalPanel butPanel = new VerticalPanel();
+			butPanel.add( button);
+			
+			JPanel rightPanel = new StackPanel();
+			rightPanel.add( paramPanel);
+			rightPanel.add( Box.createVerticalStrut( 20));
+			rightPanel.add( butPanel);
+			
+			setLayout( new BoxLayout( this, BoxLayout.X_AXIS) );
+			add( m_contractPanel);
+			add( Box.createHorizontalStrut(20) );
+			add( rightPanel);
+		}
+	
+		protected void onHistorical() {
+			m_contractPanel.onOK();
+			BarResultsPanel panel = new BarResultsPanel( true);
+			ApiDemo.INSTANCE.controller().reqHistoricalData(m_contract, m_end.getText(), m_duration.getInt(), m_durationUnit.getSelectedItem(), m_barSize.getSelectedItem(), m_whatToShow.getSelectedItem(), m_rthOnly.isSelected(), panel);
+			m_resultsPanel.addTab( "Historical " + m_contract.symbol(), panel, true, true);
+		}
+	}
+
+	private class RealtimeRequestPanel extends JPanel {
+		final ContractPanel m_contractPanel = new ContractPanel(m_contract);
+		final TCombo<WhatToShow> m_whatToShow = new TCombo<WhatToShow>( WhatToShow.values() );
+		final JCheckBox m_rthOnly = new JCheckBox();
+		
+		RealtimeRequestPanel() { 		
+			HtmlButton button = new HtmlButton( "Request real-time bars") {
+				@Override protected void actionPerformed() {
+					onRealTime();
+				}
+			};
+	
+	    	VerticalPanel paramPanel = new VerticalPanel();
+			paramPanel.add( "What to show", m_whatToShow);
+			paramPanel.add( "RTH only", m_rthOnly);
+			
+			VerticalPanel butPanel = new VerticalPanel();
+			butPanel.add( button);
+			
+			JPanel rightPanel = new StackPanel();
+			rightPanel.add( paramPanel);
+			rightPanel.add( Box.createVerticalStrut( 20));
+			rightPanel.add( butPanel);
+			
+			setLayout( new BoxLayout( this, BoxLayout.X_AXIS) );
+			add( m_contractPanel);
+			add( Box.createHorizontalStrut(20) );
+			add( rightPanel);
+		}
+	
+		protected void onRealTime() {
+			m_contractPanel.onOK();
+			BarResultsPanel panel = new BarResultsPanel( false);
+			ApiDemo.INSTANCE.controller().reqRealTimeBars(m_contract, m_whatToShow.getSelectedItem(), m_rthOnly.isSelected(), panel);
+			m_resultsPanel.addTab( "Real-time " + m_contract.symbol(), panel, true, true);
+		}
+	}
+	
+	static class BarResultsPanel extends NewTabPanel implements IHistoricalDataHandler, IRealTimeBarHandler {
+		final BarModel m_model = new BarModel();
+		final ArrayList<Bar> m_rows = new ArrayList<Bar>();
+		final boolean m_historical;
+		final Chart m_chart = new Chart( m_rows);
+		
+		BarResultsPanel( boolean historical) {
+			m_historical = historical;
+			
+			JTable tab = new JTable( m_model);
+			JScrollPane scroll = new JScrollPane( tab) {
+				public Dimension getPreferredSize() {
+					Dimension d = super.getPreferredSize();
+					d.width = 500;
+					return d;
+				}
+			};
+
+			JScrollPane chartScroll = new JScrollPane( m_chart);
+
+			setLayout( new BorderLayout() );
+			add( scroll, BorderLayout.WEST);
+			add( chartScroll, BorderLayout.CENTER);
+		}
+
+		/** Called when the tab is first visited. */
+		@Override public void activated() {
+		}
+
+		/** Called when the tab is closed by clicking the X. */
+		@Override public void closed() {
+			if (m_historical) {
+				ApiDemo.INSTANCE.controller().cancelHistoricalData( this);
+			}
+			else {
+				ApiDemo.INSTANCE.controller().cancelRealtimeBars( this);
+			}
+		}
+
+		@Override public void historicalData(Bar bar, boolean hasGaps) {
+			m_rows.add( bar);
+		}
+		
+		@Override public void historicalDataEnd() {
+			fire();
+		}
+
+		@Override public void realtimeBar(Bar bar) {
+			m_rows.add( bar); 
+			fire();
+		}
+		
+		private void fire() {
+			SwingUtilities.invokeLater( new Runnable() {
+				@Override public void run() {
+					m_model.fireTableRowsInserted( m_rows.size() - 1, m_rows.size() - 1);
+					m_chart.repaint();
+				}
+			});
+		}
+
+		class BarModel extends AbstractTableModel {
+			@Override public int getRowCount() {
+				return m_rows.size();
+			}
+
+			@Override public int getColumnCount() {
+				return 7;
+			}
+			
+			@Override public String getColumnName(int col) {
+				switch( col) {
+					case 0: return "Date/time";
+					case 1: return "Open";
+					case 2: return "High";
+					case 3: return "Low";
+					case 4: return "Close";
+					case 5: return "Volume";
+					case 6: return "WAP";
+					default: return null;
+				}
+			}
+
+			@Override public Object getValueAt(int rowIn, int col) {
+				Bar row = m_rows.get( rowIn);
+				switch( col) {
+					case 0: return row.formattedTime();
+					case 1: return row.open();
+					case 2: return row.high();
+					case 3: return row.low();
+					case 4: return row.close();
+					case 5: return row.volume();
+					case 6: return row.wap();
+					default: return null;
+				}
+			}
+		}		
+	}
+	
+	private class ScannerRequestPanel extends JPanel {
+		final UpperField m_numRows = new UpperField( "15");
+		final TCombo<ScanCode> m_scanCode = new TCombo<ScanCode>( ScanCode.values() );
+		final TCombo<Instrument> m_instrument = new TCombo<Instrument>( Instrument.values() );
+		final UpperField m_location = new UpperField( "STK.US.MAJOR", 9);
+		final TCombo<String> m_stockType = new TCombo<String>( "ALL", "STOCK", "ETF");
+		
+		ScannerRequestPanel() {
+			HtmlButton go = new HtmlButton( "Go") {
+				@Override protected void actionPerformed() {
+					onGo();
+				}
+			};
+			
+			VerticalPanel paramsPanel = new VerticalPanel();
+			paramsPanel.add( "Scan code", m_scanCode);
+			paramsPanel.add( "Instrument", m_instrument);
+			paramsPanel.add( "Location", m_location, Box.createHorizontalStrut(10), go);
+			paramsPanel.add( "Stock type", m_stockType);
+			paramsPanel.add( "Num rows", m_numRows);
+			
+			setLayout( new BorderLayout() );
+			add( paramsPanel, BorderLayout.NORTH);
+		}
+
+		protected void onGo() {
+			ScannerSubscription sub = new ScannerSubscription();
+			sub.numberOfRows( m_numRows.getInt() );
+			sub.scanCode( m_scanCode.getSelectedItem().toString() );
+			sub.instrument( m_instrument.getSelectedItem().toString() );
+			sub.locationCode( m_location.getText() );
+			sub.stockTypeFilter( m_stockType.getSelectedItem().toString() );
+			
+			ScannerResultsPanel resultsPanel = new ScannerResultsPanel();
+			m_resultsPanel.addTab( sub.scanCode(), resultsPanel, true, true);
+
+			ApiDemo.INSTANCE.controller().reqScannerSubscription( sub, resultsPanel);
+		}
+	}
+
+	static class ScannerResultsPanel extends NewTabPanel implements IScannerHandler {
+		final HashSet<Integer> m_conids = new HashSet<Integer>();
+		final TopModel m_model = new TopModel();
+
+		ScannerResultsPanel() {
+			JTable table = new JTable( m_model);
+			JScrollPane scroll = new JScrollPane( table);
+			setLayout( new BorderLayout() );
+			add( scroll);
+		}
+
+		/** Called when the tab is first visited. */
+		@Override public void activated() {
+		}
+
+		/** Called when the tab is closed by clicking the X. */
+		@Override public void closed() {
+			ApiDemo.INSTANCE.controller().cancelScannerSubscription( this);
+			m_model.desubscribe();
+		}
+
+		@Override public void scannerParameters(String xml) {
+			try {
+				File file = File.createTempFile( "pre", ".xml");
+				FileWriter writer = new FileWriter( file);
+				writer.write( xml);
+				writer.close();
+
+				Desktop.getDesktop().open( file);
+			}
+			catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
+
+		@Override public void scannerData(int rank, final NewContractDetails contractDetails, String legsStr) {
+			if (!m_conids.contains( contractDetails.conid() ) ) {
+				m_conids.add( contractDetails.conid() );
+				SwingUtilities.invokeLater( new Runnable() {
+					@Override public void run() {
+						m_model.addRow( contractDetails.contract() );
+					}
+				});
+			}
+		}
+
+		@Override public void scannerDataEnd() {
+			// we could sort here
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/MarketValueSummaryPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+
+import apidemo.AccountInfoPanel.MktValModel;
+import apidemo.AccountInfoPanel.Table;
+import apidemo.util.HtmlButton;
+import apidemo.util.VerticalPanel;
+import apidemo.util.NewTabbedPanel.NewTabPanel;
+
+import com.ib.controller.ApiController.IMarketValueSummaryHandler;
+import com.ib.controller.MarketValueTag;
+
+public class MarketValueSummaryPanel extends NewTabPanel implements IMarketValueSummaryHandler {
+	private MktValModel m_model = new MktValModel();
+
+	MarketValueSummaryPanel() {
+		HtmlButton sub = new HtmlButton( "Subscribe") {
+			protected void actionPerformed() {
+				subscribe();
+			}
+		};
+		
+		HtmlButton desub = new HtmlButton( "Desubscribe") {
+			protected void actionPerformed() {
+				desubscribe();
+			}
+		};
+		
+		JPanel buts = new VerticalPanel();
+		buts.add( sub);
+		buts.add( desub);
+
+		JTable table = new Table( m_model, 2);
+		JScrollPane scroll = new JScrollPane( table);
+		
+		setLayout( new BorderLayout() );
+		add( scroll);
+		add( buts, BorderLayout.EAST);
+	}
+
+	/** Called when the tab is first visited. */
+	@Override public void activated() {
+		subscribe();
+	}
+
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+		desubscribe();
+	}
+
+	private void subscribe() {
+		ApiDemo.INSTANCE.controller().reqMarketValueSummary( "All", this);
+	}
+
+	private void desubscribe() {
+		ApiDemo.INSTANCE.controller().cancelMarketValueSummary( this);
+		m_model.clear();
+	}
+
+	@Override public void marketValueSummary(String account, MarketValueTag tag, String value, String currency) {
+		m_model.handle( account, currency, tag, value);
+	}
+
+	@Override public void marketValueSummaryEnd() {
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/OptionChainsPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import static com.ib.controller.Formats.fmtNz;
+import static com.ib.controller.Formats.fmtPct;
+
+import java.awt.BorderLayout;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JCheckBox;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.JTextField;
+import javax.swing.Timer;
+import javax.swing.border.TitledBorder;
+import javax.swing.table.AbstractTableModel;
+
+import apidemo.util.HtmlButton;
+import apidemo.util.NewTabbedPanel;
+import apidemo.util.NewTabbedPanel.NewTabPanel;
+import apidemo.util.TCombo;
+import apidemo.util.UpperField;
+import apidemo.util.Util;
+import apidemo.util.VerticalPanel;
+
+import com.ib.controller.ApiController.IContractDetailsHandler;
+import com.ib.controller.ApiController.IOptHandler;
+import com.ib.controller.ApiController.TopMktDataAdapter;
+import com.ib.controller.NewContract;
+import com.ib.controller.NewContractDetails;
+import com.ib.controller.NewTickType;
+import com.ib.controller.Types.Right;
+import com.ib.controller.Types.SecType;
+
+public class OptionChainsPanel extends JPanel {
+	private NewContract m_underContract = new NewContract();
+	private NewTabbedPanel m_tabbedPanel = new NewTabbedPanel();
+	private JTextField m_optExch = new UpperField();
+	private UpperField m_symbol = new UpperField();
+	private TCombo<SecType> m_secType = new TCombo<SecType>( SecType.values() );
+	private UpperField m_exchange = new UpperField();
+	private UpperField m_currency = new UpperField();
+	private JCheckBox m_snapshot = new JCheckBox();
+
+	OptionChainsPanel() {
+		m_symbol.setText( "IBM");
+		m_secType.setSelectedItem( SecType.STK);
+		m_exchange.setText( "SMART"); 
+		m_currency.setText( "USD");
+		m_optExch.setText( "SMART");
+		
+		HtmlButton button = new HtmlButton( "Go") {
+			@Override protected void actionPerformed() {
+				onAdd();
+			}
+		};
+		
+		VerticalPanel topPanel = new VerticalPanel();
+		topPanel.add( "Symbol", m_symbol);
+    	topPanel.add( "Currency", m_currency);
+    	topPanel.add( "Underlying sec type", m_secType);
+    	topPanel.add( "Underlying exchange", m_exchange, Box.createHorizontalStrut(20), button);
+		topPanel.add( "Option exchange", m_optExch);
+		topPanel.add( "Use snapshot data", m_snapshot);
+		
+		setLayout( new BorderLayout() );
+		add( topPanel, BorderLayout.NORTH);
+		add( m_tabbedPanel);
+	}
+
+	protected void onAdd() {
+		m_underContract.symbol( m_symbol.getText().toUpperCase() ); 
+		m_underContract.secType( m_secType.getSelectedItem() ); 
+		m_underContract.exchange( m_exchange.getText().toUpperCase() ); 
+		m_underContract.currency( m_currency.getText().toUpperCase() ); 
+
+		ApiDemo.INSTANCE.controller().reqContractDetails( m_underContract, new IContractDetailsHandler() {
+			@Override public void contractDetails(ArrayList<NewContractDetails> list) {
+				onRecUnderDetails( list);
+			}
+		});
+	}
+
+	protected void onRecUnderDetails(ArrayList<NewContractDetails> list) {
+		if (list.size() != 1) {
+			ApiDemo.INSTANCE.show( "Error: " + list.size() + " underlying contracts returned");
+			return;
+		}
+		
+		// request option chains
+		NewContract optContract = new NewContract();
+		optContract.symbol( m_underContract.symbol() );
+		optContract.currency( m_underContract.currency() );
+		optContract.exchange( m_optExch.getText() );
+		optContract.secType( SecType.OPT);
+		
+		final ChainPanel symbolPanel = new ChainPanel();
+		m_tabbedPanel.addTab( optContract.symbol(), symbolPanel, true, true);
+		
+		ApiDemo.INSTANCE.controller().reqContractDetails( optContract, symbolPanel);
+	}
+	
+	private class ChainPanel extends NewTabPanel implements IContractDetailsHandler, ActionListener  {
+		ChainModel m_putsModel = new ChainModel();
+		JTable m_putsTable = new JTable( m_putsModel);
+		ChainModel m_callsModel = new ChainModel();
+		JTable m_callsTable = new JTable( m_callsModel);
+		Timer m_timer = new Timer( 800, this);
+	    JLabel m_labUnderPrice = new JLabel();
+	    TopMktDataAdapter m_stockListener = new TopMktDataAdapter() {
+            @Override public void tickPrice(NewTickType tickType, double price, int canAutoExecute) {
+                if (tickType == NewTickType.LAST) {
+                    m_labUnderPrice.setText( "" + price);
+                }
+            }
+        };
+	    
+		ChainPanel() {
+			JScrollPane scrollPuts = new JScrollPane( m_putsTable);
+			scrollPuts.setBorder( new TitledBorder( "Puts"));
+
+			JScrollPane scrollCalls = new JScrollPane( m_callsTable);
+			scrollCalls.setBorder( new TitledBorder( "Calls"));
+
+			VerticalPanel underPanel = new VerticalPanel();
+            underPanel.add( "Underlying price", m_labUnderPrice);
+            
+			JPanel mainPanel = new JPanel();
+			mainPanel.setLayout( new BoxLayout( mainPanel, BoxLayout.X_AXIS));
+			mainPanel.add( scrollCalls);
+            mainPanel.add( scrollPuts);
+			
+			setLayout( new BorderLayout() );
+			add( underPanel, BorderLayout.NORTH);
+			add( mainPanel);
+			
+			m_timer.start();
+			
+			ApiDemo.INSTANCE.controller().reqTopMktData( m_underContract, "", false, m_stockListener);
+		}
+		
+		/** Called when the tab is first visited. */
+        @Override public void activated() {
+        }
+
+    	/** Called when the tab is closed by clicking the X. */
+        @Override public void closed() {
+            ApiDemo.INSTANCE.controller().cancelTopMktData( m_stockListener);
+            m_putsModel.desubscribe();
+            m_callsModel.desubscribe();
+            m_timer.stop();
+        }
+
+		@Override public void actionPerformed(ActionEvent e) {
+			m_putsModel.fireTableDataChanged();
+			m_callsModel.fireTableDataChanged();
+		}
+		
+		@Override public void contractDetails(ArrayList<NewContractDetails> list) {
+			for (NewContractDetails data : list) {
+				NewContract contract = data.contract();
+				
+				if (contract.right() == Right.Put) {
+					m_putsModel.addRow( contract, m_snapshot.isSelected() );
+				}
+				else { 
+					m_callsModel.addRow( contract, m_snapshot.isSelected() );
+				}
+			}
+			m_putsModel.sort();
+			m_callsModel.sort();
+		}
+		
+		private class ChainModel extends AbstractTableModel {
+			Comparator<ChainRow> c = new Comparator<ChainRow>() {
+				@Override public int compare(ChainRow o1, ChainRow o2) {
+					int rc = o1.m_c.expiry().compareTo( o2.m_c.expiry());
+					if (rc == 0) {
+						if (o1.m_c.strike() < o2.m_c.strike()) {
+							rc = -1;
+						}
+						if (o1.m_c.strike() > o2.m_c.strike()) {
+							rc = 1;
+						}
+					}
+					return rc;
+				}
+			};
+			
+			ArrayList<ChainRow> m_list = new ArrayList<ChainRow>();
+			
+            public void desubscribe() {
+                for (ChainRow row : m_list) {
+                    ApiDemo.INSTANCE.controller().cancelOptionMktData( row);
+                }
+            }
+			
+			@Override public int getRowCount() {
+				return m_list.size();
+			}
+
+			public void sort() {
+				Collections.sort( m_list, c);
+				fireTableDataChanged();
+			}
+
+			public void addRow(NewContract contract, boolean snapshot) {
+				ChainRow row = new ChainRow( contract);
+				m_list.add( row);
+				
+				ApiDemo.INSTANCE.controller().reqOptionMktData(contract, "", snapshot, row);
+				
+				if (snapshot) {
+					Util.sleep( 11); // try to avoid pacing violation at TWS
+				}
+			}
+
+			@Override public int getColumnCount() {
+				return m_snapshot.isSelected() ? 10 : 9;
+			}
+			
+			@Override public String getColumnName(int col) {
+				switch( col) {
+					case 0: return "Expiry";
+					case 1: return "Strike";
+					case 2: return "Bid";
+					case 3: return "Ask";
+					case 4: return "Imp Vol";
+					case 5: return "Delta";
+					case 6: return "Gamma";
+					case 7: return "Vega";
+					case 8: return "Theta";
+					default: return null;
+				}
+			}
+
+			@Override public Object getValueAt(int rowIn, int col) {
+				ChainRow row = m_list.get( rowIn);
+				switch( col) {
+					case 0: return row.m_c.expiry();
+					case 1: return row.m_c.strike();
+					case 2: return fmtNz( row.m_bid);
+					case 3: return fmtNz( row.m_ask);
+					case 4: return fmtPct( row.m_impVol);
+					case 5: return fmtNz( row.m_delta);
+					case 6: return fmtNz( row.m_gamma);
+					case 7: return fmtNz( row.m_vega);
+					case 8: return fmtNz( row.m_theta);
+					case 9: return row.m_done ? "*" : null;
+					default: return null;
+				}
+			}
+	
+			private class ChainRow extends TopMktDataAdapter implements IOptHandler {
+				NewContract m_c;
+				double m_bid;
+				double m_ask;
+				double m_impVol;
+				double m_delta;
+				double m_gamma;
+				double m_vega;
+				double m_theta;
+				boolean m_done;
+		
+				public ChainRow(NewContract contract) {
+					m_c = contract;
+				}
+		
+				@Override public void tickPrice(NewTickType tickType, double price, int canAutoExecute) {
+					switch( tickType) {
+						case BID:
+							m_bid = price;
+							break;
+						case ASK:
+							m_ask = price;
+							break;
+					}
+				}
+		
+				@Override public void tickOptionComputation( NewTickType tickType, double impVol, double delta, double optPrice, double pvDividend, double gamma, double vega, double theta, double undPrice) {
+					if (tickType == NewTickType.MODEL_OPTION) {
+						m_impVol = impVol;
+						m_delta = delta;
+						m_gamma = gamma;
+						m_vega = vega;
+						m_theta = theta;
+					}
+				}
+				
+				@Override public void tickSnapshotEnd() {
+					m_done = true;
+				}
+			}
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/OptionsPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import apidemo.util.NewTabbedPanel;
+
+public class OptionsPanel extends NewTabbedPanel {
+	private final OptionChainsPanel m_optionChains = new OptionChainsPanel();
+	private final ExercisePanel m_exercisePanel = new ExercisePanel();
+	
+	OptionsPanel() {
+		NewTabbedPanel tabs = this;
+		tabs.addTab( "Option Chains", m_optionChains);
+		tabs.addTab( "Option Exercise", m_exercisePanel);
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/OrdersPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.util.ArrayList;
+import java.util.HashMap;
+
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.border.TitledBorder;
+import javax.swing.table.AbstractTableModel;
+
+
+import apidemo.util.HtmlButton;
+import apidemo.util.VerticalPanel;
+
+import com.ib.controller.NewContract;
+import com.ib.controller.NewOrder;
+import com.ib.controller.NewOrderState;
+import com.ib.controller.OrderStatus;
+import com.ib.controller.OrderType;
+import com.ib.controller.ApiController.ILiveOrderHandler;
+
+public class OrdersPanel extends JPanel {
+	private OrdersModel m_model = new OrdersModel();
+	private JTable m_table = new JTable( m_model);
+
+	OrdersPanel() {
+		JScrollPane scroll = new JScrollPane( m_table);
+		scroll.setBorder( new TitledBorder( "Live Orders"));
+		
+		m_table.addMouseListener( new MouseAdapter() {
+			public void mouseClicked(MouseEvent e) {
+				if (e.getClickCount() == 2) {
+					onDoubleClick();
+				}
+			}
+		});
+		
+		HtmlButton ticket = new HtmlButton( "Place New Order") {
+			@Override public void actionPerformed() {
+				onPlaceOrder();
+			}
+		};
+
+		HtmlButton modify = new HtmlButton( "Modify Selected Order") {
+			@Override public void actionPerformed() {
+				onDoubleClick();
+			}
+		};
+
+		HtmlButton attach = new HtmlButton( "Attach New Order to Selected Order") {
+			@Override public void actionPerformed() {
+				onAttachOrder();
+			}
+		};
+
+		HtmlButton reqExisting = new HtmlButton( "Take Over Existing TWS Orders") {
+			@Override public void actionPerformed() {
+				onTakeOverExisting();
+			}
+		};
+
+		HtmlButton reqFuture = new HtmlButton( "Take Over Future TWS Orders") {
+			@Override public void actionPerformed() {
+				onTakeOverFuture();
+			}
+		};
+
+		HtmlButton cancel = new HtmlButton( "Cancel Selected Order") {
+			@Override public void actionPerformed() {
+				onCancel();
+			}
+		};
+
+		HtmlButton cancelAll = new HtmlButton( "Cancel All Orders") {
+			@Override public void actionPerformed() {
+				onCancelAll();
+			}
+		};
+
+		HtmlButton refresh = new HtmlButton( "Refresh") {
+			@Override public void actionPerformed() {
+				onRefresh();
+			}
+		};
+
+		JPanel buts = new VerticalPanel();
+		buts.add( ticket);
+		buts.add( modify);
+		buts.add( attach);
+		buts.add( cancel);
+		buts.add( cancelAll);
+		buts.add( reqExisting);
+		buts.add( reqFuture);
+		buts.add( refresh);
+		
+		setLayout( new BorderLayout() );
+		add( buts, BorderLayout.EAST);
+		add( scroll);
+	}
+
+	protected void onDoubleClick() {
+		OrderRow order = getSelectedOrder();
+		if (order != null) {
+			TicketDlg dlg = new TicketDlg( order.m_contract, order.m_order);
+			dlg.setVisible( true);
+		}
+	}
+
+	protected void onTakeOverExisting() {
+		ApiDemo.INSTANCE.controller().takeTwsOrders( m_model);
+	}
+
+	protected void onTakeOverFuture() {
+		ApiDemo.INSTANCE.controller().takeFutureTwsOrders( m_model);
+	}
+
+	protected void onCancel() {
+		OrderRow order = getSelectedOrder();
+		if (order != null) {
+			ApiDemo.INSTANCE.controller().cancelOrder( order.m_order.orderId() );
+		}
+	}
+
+	protected void onCancelAll() {
+		ApiDemo.INSTANCE.controller().cancelAllOrders();
+	}
+
+	private OrderRow getSelectedOrder() {
+		int i = m_table.getSelectedRow();
+		return i != -1 ? m_model.get( i) : null;
+	}
+
+	public void activated() {
+		onRefresh();
+	}
+	
+	private static void onPlaceOrder() {
+		TicketDlg dlg = new TicketDlg( null, null);
+		dlg.setVisible( true);
+	}
+
+	protected void onAttachOrder() {
+		OrderRow row = getSelectedOrder();
+		if (row != null) {
+			NewOrder parent = row.m_order;
+			
+			NewOrder child = new NewOrder();
+			child.parentId( parent.orderId() );
+			child.action( parent.action() );
+			child.totalQuantity( parent.totalQuantity() );
+			child.orderType( OrderType.TRAIL);
+			child.auxPrice( 1);
+			
+			TicketDlg dlg = new TicketDlg( row.m_contract.clone(), child);
+			dlg.setVisible( true);
+		}
+	}
+
+	protected void onRefresh() {
+		m_model.clear();
+		m_model.fireTableDataChanged();
+		ApiDemo.INSTANCE.controller().reqLiveOrders( m_model);
+	}
+	
+	static class OrdersModel extends AbstractTableModel implements ILiveOrderHandler {
+		private HashMap<Long,OrderRow> m_map = new HashMap<Long,OrderRow>();
+		private ArrayList<OrderRow> m_orders = new ArrayList<OrderRow>();
+
+		@Override public int getRowCount() {
+			return m_orders.size();
+		}
+
+		public void clear() {
+			m_orders.clear();
+			m_map.clear();
+		}
+
+		public OrderRow get(int i) {
+			return m_orders.get( i);
+		}
+
+		@Override public void openOrder(NewContract contract, NewOrder order, NewOrderState orderState) {
+			OrderRow full = m_map.get( order.permId() );
+			
+			if (full != null) {
+				full.m_order = order;
+				full.m_state = orderState;
+				fireTableDataChanged();
+			}
+			else if (shouldAdd(contract, order, orderState) ) {
+				full = new OrderRow( contract, order, orderState);
+				add( full);
+				m_map.put( order.permId(), full);
+				fireTableDataChanged();
+			}
+		}
+
+		protected boolean shouldAdd(NewContract contract, NewOrder order, NewOrderState orderState) {
+			return true;
+		}
+
+		protected void add(OrderRow full) {
+			m_orders.add( full);
+		}
+
+		@Override public void openOrderEnd() {
+		}
+		
+		@Override public void orderStatus(int orderId, OrderStatus status, int filled, int remaining, double avgFillPrice, long permId, int parentId, double lastFillPrice, int clientId, String whyHeld) {
+			OrderRow full = m_map.get( permId);
+			if (full != null) {
+				full.m_state.status( status);
+			}
+			fireTableDataChanged();
+		}
+		
+		@Override public int getColumnCount() {
+			return 8;
+		}
+		
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Perm ID";
+				case 1: return "Client ID";
+				case 2: return "Order ID";
+				case 3: return "Account";
+				case 4: return "Action";
+				case 5: return "Quantity";
+				case 6: return "Contract";
+				case 7: return "Status";
+				default: return null;
+			}
+		}
+		
+		@Override public Object getValueAt(int row, int col) {
+			OrderRow fullOrder = m_orders.get( row);
+			NewOrder order = fullOrder.m_order;
+			switch( col) {
+				case 0: return order.permId();
+				case 1: return order.clientId();
+				case 2: return order.orderId();
+				case 3: return order.account();
+				case 4: return order.action();
+				case 5: return order.totalQuantity();
+				case 6: return fullOrder.m_contract.description();
+				case 7: return fullOrder.m_state.status();
+				default: return null;
+			}
+		}
+
+		@Override public void handle(int orderId, int errorCode, String errorMsg) {
+		}
+	}
+	
+	static class OrderRow {
+		NewContract m_contract;
+		NewOrder m_order;
+		NewOrderState m_state;
+
+		OrderRow( NewContract contract, NewOrder order, NewOrderState state) {
+			m_contract = contract;
+			m_order = order;
+			m_state = state;
+		}
+	}
+
+	static class Key {
+		int m_clientId;
+		int m_orderId;
+		
+		Key( int clientId, int orderId) {
+			m_clientId = clientId;
+			m_orderId = orderId;
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/PositionsPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.util.ArrayList;
+import java.util.HashMap;
+
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.table.AbstractTableModel;
+
+
+import apidemo.AccountInfoPanel.Table;
+import apidemo.util.HtmlButton;
+import apidemo.util.VerticalPanel;
+import apidemo.util.NewTabbedPanel.NewTabPanel;
+
+import com.ib.controller.Formats;
+import com.ib.controller.NewContract;
+import com.ib.controller.ApiController.IPositionHandler;
+
+
+public class PositionsPanel extends NewTabPanel {
+	private PositionModel m_model = new PositionModel();
+	private boolean m_complete;
+
+	PositionsPanel() {
+		HtmlButton sub = new HtmlButton( "Subscribe") {
+			protected void actionPerformed() {
+				subscribe();
+			}
+		};
+		
+		HtmlButton desub = new HtmlButton( "Desubscribe") {
+			protected void actionPerformed() {
+				desubscribe();
+			}
+		};
+
+		JPanel buts = new VerticalPanel();
+		buts.add( sub);
+		buts.add( desub);
+
+		JTable table = new Table( m_model, 2);
+		JScrollPane scroll = new JScrollPane( table);
+		
+		setLayout( new BorderLayout() );
+		add( scroll);
+		add( buts, BorderLayout.EAST);
+	}
+
+	/** Called when the tab is first visited. Sends request for all positions. */
+	@Override public void activated() {
+		subscribe();
+	}
+
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+		desubscribe();
+	}
+	
+	private void subscribe() {
+		ApiDemo.INSTANCE.controller().reqPositions( m_model);
+	}
+	
+	private void desubscribe() {
+		ApiDemo.INSTANCE.controller().cancelPositions( m_model);
+		m_model.clear();
+	}
+	
+	private class PositionModel extends AbstractTableModel implements IPositionHandler {
+		HashMap<PositionKey,PositionRow> m_map = new HashMap<PositionKey,PositionRow>();
+		ArrayList<PositionRow> m_list = new ArrayList<PositionRow>();
+
+		@Override public void position(String account, NewContract contract, int position, double avgCost) {
+			PositionKey key = new PositionKey( account, contract.conid() );
+			PositionRow row = m_map.get( key);
+			if (row == null) {
+				row = new PositionRow();
+				m_map.put( key, row);
+				m_list.add( row);
+			}
+			row.update( account, contract, position, avgCost);
+			
+			if (m_complete) {
+				m_model.fireTableDataChanged();
+			}
+		}
+
+		@Override public void positionEnd() {
+			m_model.fireTableDataChanged();
+			m_complete = true;
+		}
+
+		public void clear() {
+			m_map.clear();
+			m_list.clear();
+			fireTableDataChanged();
+		}
+
+		@Override public int getRowCount() {
+			return m_map.size();
+		}
+
+		@Override public int getColumnCount() {
+			return 4;
+		}
+		
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Account";
+				case 1: return "Contract";
+				case 2: return "Position";
+				case 3: return "Avg Cost";
+				default: return null;
+			}
+		}
+
+		@Override public Object getValueAt(int rowIn, int col) {
+			PositionRow row = m_list.get( rowIn);
+			
+			switch( col) {
+				case 0: return row.m_account;
+				case 1: return row.m_contract.description();
+				case 2: return row.m_position;
+				case 3: return Formats.fmt( row.m_avgCost);
+				default: return null;
+			}
+		}
+	}
+	
+	private static class PositionKey {
+		String m_account;
+		int m_conid;
+
+		PositionKey( String account, int conid) {
+			m_account = account;
+			m_conid = conid;
+		}
+		
+		@Override public int hashCode() {
+			return m_account.hashCode() + m_conid;
+		}
+		
+		@Override public boolean equals(Object obj) {
+			PositionKey other = (PositionKey)obj;
+			return m_account.equals( other.m_account) && m_conid == other.m_conid;
+		}
+	}
+
+	private static class PositionRow {
+		String m_account;
+		NewContract m_contract;
+		int m_position;
+		double m_avgCost;
+
+		void update(String account, NewContract contract, int position, double avgCost) {
+			m_account = account;
+			m_contract = contract;
+			m_position = position;
+			m_avgCost = avgCost;
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/StratPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.util.ArrayList;
+import java.util.TreeMap;
+
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.border.TitledBorder;
+
+
+import apidemo.OrdersPanel.OrdersModel;
+import apidemo.util.HtmlButton;
+import apidemo.util.TCombo;
+import apidemo.util.UpperField;
+import apidemo.util.VerticalPanel.BorderPanel;
+import apidemo.util.VerticalPanel.HorzPanel;
+import apidemo.util.VerticalPanel.StackPanel;
+
+import com.ib.controller.Bar;
+import com.ib.controller.NewContract;
+import com.ib.controller.ApiController.IHistoricalDataHandler;
+import com.ib.controller.ApiController.IRealTimeBarHandler;
+import com.ib.controller.Types.BarSize;
+import com.ib.controller.Types.DurationUnit;
+import com.ib.controller.Types.WhatToShow;
+
+
+public class StratPanel extends StackPanel implements IHistoricalDataHandler, IRealTimeBarHandler {
+	final private NewContract m_contract = new NewContract();
+	final private ContractPanel m_contractPanel = new ContractPanel( m_contract);
+	final private UpperField m_shares = new UpperField();
+	final private UpperField m_pct1 = new UpperField();
+	final private UpperField m_pct2 = new UpperField();
+	final private OrdersModel m_ordersModel = new OrdersModel();
+	final private TCombo<BarSize> m_barSize = new TCombo<BarSize>( BarSize.values() );
+	final private UpperField m_bars = new UpperField();
+	final private ArrayList<Bar> m_rows = new ArrayList<Bar>();
+	final private Chart m_chart = new Chart( m_rows);
+	private boolean m_req;
+	
+	private static Component sp(int n) { return Box.createHorizontalStrut(n); }
+
+	StratPanel() {
+		m_contractPanel.setBorder( new TitledBorder( "Define Contract"));
+		
+		JPanel p1 = new HPanel();
+		add( p1, "Go long", sp(5), m_shares, sp(5), "shares when ask goes above SMA by", sp(5), m_pct1, "%");
+		
+		JPanel p2 = new HPanel();
+		add( p2, "Go flat when bid goes below SMA by", sp(5), m_pct2, "%");
+		
+		JPanel p3 = new HPanel();
+		add( p3, "SMA bar size:", sp(5), m_barSize, sp(20), "SMA number of bars", sp(5), m_bars);
+		
+		HtmlButton start = new HtmlButton( "Start") {
+			@Override protected void actionPerformed() {
+				onStart();
+			}
+		};
+				
+		HtmlButton stop = new HtmlButton( "Stop") {
+			@Override protected void actionPerformed() {
+				onStop();
+			}
+		};
+		
+		JPanel buts = new JPanel();
+		buts.add( start);
+		buts.add( Box.createHorizontalStrut(30));
+		buts.add( stop);
+		
+		StackPanel rightPanel = new StackPanel();
+		rightPanel.setBorder( new TitledBorder( "Define Strategy"));
+		rightPanel.add( p1);
+		rightPanel.add( Box.createVerticalStrut(10));
+		rightPanel.add( p2);
+		rightPanel.add( Box.createVerticalStrut(10));
+		rightPanel.add( p3);
+		rightPanel.add( Box.createVerticalStrut(10));
+		rightPanel.add( buts);
+
+		JScrollPane chartScroll = new JScrollPane( m_chart);
+		m_chart.setBorder( new TitledBorder( "chart"));
+		chartScroll.setBorder( new TitledBorder( "chart scroll"));
+
+		HorzPanel horzPanel = new HorzPanel();
+		horzPanel.add( m_contractPanel);
+		horzPanel.add( rightPanel);
+		
+		BorderPanel topPanel = new BorderPanel();
+		topPanel.add( horzPanel, BorderLayout.WEST);
+		topPanel.add( chartScroll);
+
+		JTable ordersTable = new JTable( m_ordersModel);
+		JScrollPane ordersScroll = new JScrollPane( ordersTable);
+		ordersScroll.setBorder( new TitledBorder( "Orders"));
+		
+		setLayout( new BoxLayout( this, BoxLayout.Y_AXIS));
+		add( topPanel);
+		add( ordersScroll);
+		add( new TradesPanel() );
+	}
+	
+	protected void onStart() {
+		m_contractPanel.onOK();
+		ApiDemo.INSTANCE.controller().reqRealTimeBars(m_contract, WhatToShow.TRADES, false, this);
+	}
+
+	@Override public void realtimeBar(Bar bar) {
+		if (!m_req) {
+			BarSize barSize = m_barSize.getSelectedItem();
+			QueryLength queryLength = getQueryLength( barSize);
+			String date = Bar.format( bar.time() * 1000);
+			int duration = m_bars.getInt() * queryLength.m_units;
+			ApiDemo.INSTANCE.controller().reqHistoricalData(m_contract, date, duration, queryLength.m_unit, barSize, WhatToShow.TRADES, false, this);
+			m_req = true;
+		}
+		addBar( bar);
+		m_chart.repaint();
+	}
+	
+	TreeMap<Long,Bar> m_map = new TreeMap<Long,Bar>();
+	
+	@Override public void historicalData(Bar bar, boolean hasGaps) {
+		System.out.println( bar);
+		addBar( bar);
+	}
+
+	private void addBar( Bar bar) {
+		m_map.put( bar.time(), bar);
+		m_rows.clear();
+		m_rows.addAll( m_map.values() );
+	}
+
+	@Override public void historicalDataEnd() {
+		m_chart.repaint();
+	}
+
+	static class QueryLength {
+		int m_units;
+		DurationUnit m_unit;
+
+		QueryLength( int units, DurationUnit unit) {
+			m_units = units;
+			m_unit = unit;
+		}
+	}
+
+	protected void onStop() {
+		ApiDemo.INSTANCE.controller().cancelRealtimeBars(this);
+		ApiDemo.INSTANCE.controller().cancelHistoricalData(this);
+	}
+
+	void add( JPanel p, Object...objs) {
+		for (Object obj : objs) {
+			if (obj instanceof String) {
+				p.add( new JLabel( (String)obj) );
+			}
+			else {
+				p.add( (Component)obj);
+			}
+		}
+	}
+	
+	class HPanel extends HorzPanel {
+		@Override public Dimension getMaximumSize() {
+			return super.getPreferredSize();
+		}
+	}
+
+	private static QueryLength getQueryLength( BarSize barSize) {
+		switch( barSize) {
+			case _1_secs: 	return new QueryLength( 1, DurationUnit.SECOND);
+			case _5_secs:	return new QueryLength( 5, DurationUnit.SECOND);
+			case _10_secs:	return new QueryLength( 10, DurationUnit.SECOND);
+			case _15_secs:	return new QueryLength( 15, DurationUnit.SECOND);
+			case _30_secs:	return new QueryLength( 30, DurationUnit.SECOND);
+			case _1_min:	return new QueryLength( 60, DurationUnit.SECOND);
+			case _2_mins:	return new QueryLength( 120, DurationUnit.SECOND);
+			case _3_mins:	return new QueryLength( 180, DurationUnit.SECOND);
+			case _5_mins:	return new QueryLength( 300, DurationUnit.SECOND);
+			case _10_mins:	return new QueryLength( 600, DurationUnit.SECOND);
+			case _15_mins:	return new QueryLength( 900, DurationUnit.SECOND);
+			case _20_mins:	return new QueryLength( 1200, DurationUnit.SECOND);
+			case _30_mins:	return new QueryLength( 1800, DurationUnit.SECOND);
+			case _1_hour:	return new QueryLength( 3600, DurationUnit.SECOND);
+			case _4_hours:	return new QueryLength( 14400, DurationUnit.SECOND);
+			case _1_day:	return new QueryLength( 1, DurationUnit.DAY);
+			case _1_week:	return new QueryLength( 1, DurationUnit.WEEK);
+		default:		return null;
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/Test.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import com.ib.client.CommissionReport;
+import com.ib.client.Contract;
+import com.ib.client.ContractDetails;
+import com.ib.client.EClientSocket;
+import com.ib.client.EWrapper;
+import com.ib.client.Execution;
+import com.ib.client.Order;
+import com.ib.client.OrderState;
+import com.ib.client.UnderComp;
+
+public class Test implements EWrapper {
+	EClientSocket m_s = new EClientSocket(this);
+	
+	public static void main(String[] args) {
+		new Test().run();
+	}
+
+	private void run() {
+		m_s.eConnect("localhost", 7496, 0);
+	}
+
+	@Override public void nextValidId(int orderId) {
+		
+	}
+
+	@Override public void error(Exception e) {
+	}
+
+	@Override public void error(int id, int errorCode, String errorMsg) {
+	}
+
+	@Override public void connectionClosed() {
+	}
+
+	@Override public void error(String str) {
+	}
+
+	@Override public void tickPrice(int tickerId, int field, double price, int canAutoExecute) {
+	}
+
+	@Override public void tickSize(int tickerId, int field, int size) {
+	}
+
+	@Override public void tickOptionComputation(int tickerId, int field, double impliedVol, double delta, double optPrice, double pvDividend, double gamma, double vega, double theta, double undPrice) {
+	}
+
+	@Override public void tickGeneric(int tickerId, int tickType, double value) {
+	}
+
+	@Override public void tickString(int tickerId, int tickType, String value) {
+	}
+
+	@Override public void tickEFP(int tickerId, int tickType, double basisPoints, String formattedBasisPoints, double impliedFuture, int holdDays, String futureExpiry, double dividendImpact,
+			double dividendsToExpiry) {
+	}
+
+	@Override public void orderStatus(int orderId, String status, int filled, int remaining, double avgFillPrice, int permId, int parentId, double lastFillPrice, int clientId, String whyHeld) {
+	}
+
+	@Override public void openOrder(int orderId, Contract contract, Order order, OrderState orderState) {
+	}
+
+	@Override public void openOrderEnd() {
+	}
+
+	@Override public void updateAccountValue(String key, String value, String currency, String accountName) {
+	}
+
+	@Override public void updatePortfolio(Contract contract, int position, double marketPrice, double marketValue, double averageCost, double unrealizedPNL, double realizedPNL, String accountName) {
+	}
+
+	@Override public void updateAccountTime(String timeStamp) {
+	}
+
+	@Override public void accountDownloadEnd(String accountName) {
+	}
+
+	@Override public void contractDetails(int reqId, ContractDetails contractDetails) {
+	}
+
+	@Override public void bondContractDetails(int reqId, ContractDetails contractDetails) {
+	}
+
+	@Override public void contractDetailsEnd(int reqId) {
+	}
+
+	@Override public void execDetails(int reqId, Contract contract, Execution execution) {
+	}
+
+	@Override public void execDetailsEnd(int reqId) {
+	}
+
+	@Override public void updateMktDepth(int tickerId, int position, int operation, int side, double price, int size) {
+	}
+
+	@Override public void updateMktDepthL2(int tickerId, int position, String marketMaker, int operation, int side, double price, int size) {
+	}
+
+	@Override public void updateNewsBulletin(int msgId, int msgType, String message, String origExchange) {
+	}
+
+	@Override public void managedAccounts(String accountsList) {
+	}
+
+	@Override public void receiveFA(int faDataType, String xml) {
+	}
+
+	@Override public void historicalData(int reqId, String date, double open, double high, double low, double close, int volume, int count, double WAP, boolean hasGaps) {
+	}
+
+	@Override public void scannerParameters(String xml) {
+	}
+
+	@Override public void scannerData(int reqId, int rank, ContractDetails contractDetails, String distance, String benchmark, String projection, String legsStr) {
+	}
+
+	@Override public void scannerDataEnd(int reqId) {
+	}
+
+	@Override public void realtimeBar(int reqId, long time, double open, double high, double low, double close, long volume, double wap, int count) {
+	}
+
+	@Override public void currentTime(long time) {
+	}
+
+	@Override public void fundamentalData(int reqId, String data) {
+	}
+
+	@Override public void deltaNeutralValidation(int reqId, UnderComp underComp) {
+	}
+
+	@Override public void tickSnapshotEnd(int reqId) {
+	}
+
+	@Override public void marketDataType(int reqId, int marketDataType) {
+	}
+
+	@Override public void commissionReport(CommissionReport commissionReport) {
+	}
+
+	@Override public void position(String account, Contract contract, int pos, double avgCost) {
+	}
+
+	@Override public void positionEnd() {
+	}
+
+	@Override public void accountSummary(int reqId, String account, String tag, String value, String currency) {
+	}
+
+	@Override public void accountSummaryEnd(int reqId) {
+	}
+	
+	@Override public void verifyMessageAPI( String apiData) {
+	}
+
+	@Override public void verifyCompleted( boolean isSuccessful, String errorText){
+	}
+
+	@Override public void displayGroupList( int reqId, String groups){
+	}
+
+	@Override public void displayGroupUpdated( int reqId, String contractInfo){
+	}
+	
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/TicketDlg.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import static com.ib.controller.Formats.fmt;
+
+import java.awt.BorderLayout;
+import java.awt.FlowLayout;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+
+import javax.swing.Box;
+import javax.swing.JCheckBox;
+import javax.swing.JDialog;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
+
+import apidemo.util.HtmlButton;
+import apidemo.util.NewTabbedPanel;
+import apidemo.util.TCombo;
+import apidemo.util.UpperField;
+import apidemo.util.Util;
+import apidemo.util.VerticalPanel;
+import apidemo.util.VerticalPanel.HorzPanel;
+import apidemo.util.VerticalPanel.StackPanel;
+
+import com.ib.client.TagValue;
+import com.ib.controller.ApiController.IOrderHandler;
+import com.ib.controller.NewContract;
+import com.ib.controller.NewOrder;
+import com.ib.controller.NewOrderState;
+import com.ib.controller.OrderStatus;
+import com.ib.controller.OrderType;
+import com.ib.controller.Types.Action;
+import com.ib.controller.Types.AlgoParam;
+import com.ib.controller.Types.AlgoStrategy;
+import com.ib.controller.Types.ComboParam;
+import com.ib.controller.Types.HedgeType;
+import com.ib.controller.Types.Method;
+import com.ib.controller.Types.OcaType;
+import com.ib.controller.Types.ReferencePriceType;
+import com.ib.controller.Types.Rule80A;
+import com.ib.controller.Types.TimeInForce;
+import com.ib.controller.Types.TriggerMethod;
+import com.ib.controller.Types.VolatilityType;
+
+public class TicketDlg extends JDialog {
+	private boolean m_editContract;
+	private final NewContract m_contract;
+	private final NewOrder m_order;
+	private final ContractPanel m_contractPanel;
+	private final OrderPanel m_orderPanel;
+	private final AdvisorTicketPanel m_advisorPanel;
+	private final MiscTicketPanel m_attribTicketPanel;
+	private final VolatilityTicketPanel m_volPanel;
+	private final ComboTicketPanel m_comboPanel;
+	private final AlgoPanel m_algoPanel;
+	private final ScalePanel m_scalePanel;
+	
+	public TicketDlg(NewContract contract, NewOrder order) {
+		super( ApiDemo.INSTANCE.frame());
+		
+		if (contract == null) {
+			contract = new NewContract();
+			m_editContract = true;
+		}
+
+		if (order == null) {
+			order = new NewOrder();
+			order.totalQuantity( 100);
+			order.lmtPrice( 1);
+		}
+		
+		m_contract = contract;
+		m_order = order;
+		
+		m_contractPanel = new ContractPanel( m_contract);
+		m_orderPanel = new OrderPanel();
+		m_advisorPanel = new AdvisorTicketPanel();
+		m_attribTicketPanel = new MiscTicketPanel();
+		m_volPanel = new VolatilityTicketPanel();
+		m_comboPanel = new ComboTicketPanel();
+		m_algoPanel = new AlgoPanel();
+		m_scalePanel = new ScalePanel();
+		
+		HtmlButton transmitOrder = new HtmlButton( "Transmit Order") {
+			@Override public void actionPerformed() {
+				onTransmitOrder();
+			}
+		};
+		
+		HtmlButton checkMargin = new HtmlButton( "Check Margin") {
+			@Override public void actionPerformed() {
+				onCheckMargin();
+			}
+		};
+		
+		HtmlButton close = new HtmlButton( "Close") {
+			@Override public void actionPerformed() {
+				dispose();
+			}
+		};
+		
+		NewTabbedPanel tabbedPanel = new NewTabbedPanel(true);
+		if (m_editContract) {
+			tabbedPanel.addTab( "Contract", m_contractPanel);
+		}
+		tabbedPanel.addTab( "Order", m_orderPanel);
+		tabbedPanel.addTab( "Misc", m_attribTicketPanel);
+		tabbedPanel.addTab( "Advisor", m_advisorPanel);
+		tabbedPanel.addTab( "Volatility", m_volPanel);
+		if (m_contract.isCombo() ) {
+			tabbedPanel.addTab( "Combo", m_comboPanel);
+		}
+		tabbedPanel.addTab( "Scale", m_scalePanel);
+		tabbedPanel.addTab( "IB Algo", m_algoPanel);
+		
+		JPanel buts = new JPanel( new FlowLayout( FlowLayout.CENTER, 15, 5));
+		buts.add( transmitOrder);		
+		buts.add( checkMargin);
+		buts.add( close);
+		
+		// check-margin is for new orders only
+		if (m_order.orderId() != 0) {
+			checkMargin.setVisible( false);
+		}
+
+		add( tabbedPanel);
+		add( buts, BorderLayout.SOUTH);
+
+		setLocation(200, 200);
+		pack();
+		Util.closeOnEsc( this);
+	}
+	
+	protected void onTransmitOrder() {
+		scrape();
+		
+		// close window right away for mods
+		if (m_order.orderId() != 0) {
+			dispose();
+		}
+
+		ApiDemo.INSTANCE.controller().placeOrModifyOrder( m_contract, m_order, new IOrderHandler() {
+			@Override public void orderState(NewOrderState orderState) {
+				ApiDemo.INSTANCE.controller().removeOrderHandler( this);
+				SwingUtilities.invokeLater( new Runnable() {
+					@Override public void run() {
+						dispose();
+					}
+				});
+			}
+			@Override public void orderStatus(OrderStatus status, int filled, int remaining, double avgFillPrice, long permId, int parentId, double lastFillPrice, int clientId, String whyHeld) {
+			}
+			@Override public void handle(int errorCode, final String errorMsg) {
+				m_order.orderId( 0);
+				SwingUtilities.invokeLater( new Runnable() {
+					@Override public void run() {
+						JOptionPane.showMessageDialog( TicketDlg.this, errorMsg);
+					}
+				});
+			}
+		});
+	}
+
+	protected void onCheckMargin() {
+		scrape();
+		
+		m_order.whatIf( true);
+		ApiDemo.INSTANCE.controller().placeOrModifyOrder( m_contract, m_order, new IOrderHandler() {
+			@Override public void orderState(final NewOrderState orderState) {
+				SwingUtilities.invokeLater( new Runnable() {
+					@Override public void run() {
+						displayMargin( orderState);
+					}
+				});
+			}
+			@Override public void handle(int errorCode, final String errorMsg) {
+				SwingUtilities.invokeLater( new Runnable() {
+					@Override public void run() {
+						JOptionPane.showMessageDialog( TicketDlg.this, errorMsg);
+					}
+				});
+			}
+			@Override public void orderStatus(OrderStatus status, int filled, int remaining, double avgFillPrice, long permId, int parentId, double lastFillPrice, int clientId, String whyHeld) {
+			}
+		});
+		
+		m_order.whatIf( false);
+		m_order.orderId( 0);
+	}
+
+	protected void displayMargin(NewOrderState orderState) {
+		String str = String.format( "Equity with loan: %s\n\nInitial margin: %s\nMaintenance margin: %s\n",
+				fmt( Double.parseDouble(orderState.equityWithLoan() ) ),
+				fmt( Double.parseDouble( orderState.initMargin() ) ),
+				fmt( Double.parseDouble(orderState.maintMargin() ) ) );
+		
+		JOptionPane.showMessageDialog( this, str, "Post-Trade Margin Requirements", JOptionPane.INFORMATION_MESSAGE);
+	}
+
+	private void scrape() {
+		m_order.smartComboRoutingParams().clear();
+		
+		if (m_editContract) {
+			m_contractPanel.onOK();
+		}
+		m_orderPanel.onOK();
+		m_advisorPanel.onOK();
+		m_attribTicketPanel.onOK();
+		m_volPanel.onOK();
+		m_algoPanel.onOK();
+		m_scalePanel.onOK();
+		if (m_contract.isCombo() ) {
+			m_comboPanel.onOK();
+		}
+	}
+
+	class OrderPanel extends VerticalPanel {
+		final TCombo<String> m_account = new TCombo<String>( ApiDemo.INSTANCE.accountList().toArray(new String[0]) );
+		final TCombo<Action> m_action = new TCombo<Action>( Action.values() );
+		final UpperField m_quantity = new UpperField( "100");
+		final UpperField m_displaySize = new UpperField();
+		final TCombo<OrderType> m_orderType = new TCombo<OrderType>( OrderType.values() ); 
+		final UpperField m_lmtPrice = new UpperField( "200");
+		final UpperField m_auxPrice = new UpperField();
+		final TCombo<TimeInForce> m_tif = new TCombo<TimeInForce>( TimeInForce.values() );
+		final JCheckBox m_nonGuaranteed = new JCheckBox();
+
+		OrderPanel() {
+			m_orderType.removeItemAt( 0); // remove None
+			
+			m_account.setSelectedItem( m_order.account() != null ? m_order.account() : ApiDemo.INSTANCE.accountList().get( 0) ); 
+			m_action.setSelectedItem( m_order.action() );
+			m_quantity.setText( m_order.totalQuantity());
+			m_displaySize.setText( m_order.displaySize());
+			m_orderType.setSelectedItem( m_order.orderType() );
+			m_lmtPrice.setText( m_order.lmtPrice());
+			m_auxPrice.setText( m_order.auxPrice());
+			m_tif.setSelectedItem( m_order.tif());
+			m_nonGuaranteed.setSelected( getVal( ComboParam.NonGuaranteed).equals( "1") );
+			
+			add( "Account", m_account);
+			add( "Action", m_action);
+			add( "Quantity", m_quantity);
+			add( "Display size", m_displaySize);
+			add( "Order type", m_orderType);
+			add( "Limit price", m_lmtPrice);
+			add( "Aux price", m_auxPrice);
+			add( "Time-in-force", m_tif);
+			if (m_contract.isCombo() ) {
+				add( "Non-guaranteed", m_nonGuaranteed);
+			}
+		}
+		
+		private void onOK() {
+			m_order.account( m_account.getText().toUpperCase() );
+			m_order.action( m_action.getSelectedItem() );
+			m_order.totalQuantity( m_quantity.getInt() );
+			m_order.displaySize( m_displaySize.getInt() );
+			m_order.orderType( m_orderType.getSelectedItem() );
+			m_order.lmtPrice( m_lmtPrice.getDouble() );
+			m_order.auxPrice( m_auxPrice.getDouble() );
+			m_order.tif( m_tif.getSelectedItem() );
+			if (m_contract.isCombo() ) {
+				TagValue tv = new TagValue( ComboParam.NonGuaranteed.toString(), m_nonGuaranteed.isSelected() ? "1" : "0");
+				m_order.smartComboRoutingParams().add( tv);
+			}
+		}
+	}
+	
+	class AdvisorTicketPanel extends VerticalPanel {
+		final UpperField m_faGroup = new UpperField();
+		final TCombo<Method> m_faMethod = new TCombo<Method>( Method.values() );
+		final UpperField m_faPercentage = new UpperField();
+		final UpperField m_faProfile = new UpperField();
+		
+		AdvisorTicketPanel() {
+			m_faGroup.setText( m_order.faGroup() );
+			m_faMethod.setSelectedItem( m_order.faMethod() );
+			m_faPercentage.setText( m_order.faPercentage() );
+			m_faProfile.setText( m_order.faProfile() );
+			
+			add( "Group", m_faGroup);
+			add( "Method", m_faMethod);
+			add( "Percentage", m_faPercentage);
+			add( Box.createVerticalStrut(10));
+			add( "--or--");
+			add( Box.createVerticalStrut(10));
+			add( "Profile", m_faProfile);
+		}
+		
+		void onOK() {
+			m_order.faGroup( m_faGroup.getText() );
+			m_order.faMethod( m_faMethod.getSelectedItem() );
+			m_order.faPercentage( m_faPercentage.getText() );
+			m_order.faProfile( m_faProfile.getText() );
+		}
+	}
+	
+	class MiscTicketPanel extends StackPanel {
+		final UpperField m_goodAfter = new UpperField();
+		final UpperField m_goodTil = new UpperField();
+		final JTextField m_orderRef = new JTextField(7);
+		final JTextField m_ocaGroup = new JTextField(7);
+		final UpperField m_minQty = new UpperField();
+		final UpperField m_percentOffset = new UpperField();
+		final UpperField m_trailingStopPrice = new UpperField();
+		final UpperField m_trailingPercent = new UpperField();
+		final UpperField m_discretionaryAmt = new UpperField();
+		final UpperField m_nbboPriceCap = new UpperField();
+
+		final TCombo<OcaType> m_ocaType = new TCombo<OcaType>( OcaType.values() );
+		final TCombo<Rule80A> m_rule80A = new TCombo<Rule80A>( Rule80A.values() );
+		final TCombo<TriggerMethod> m_trigger = new TCombo<TriggerMethod>( TriggerMethod.values() );
+
+		final TCombo<HedgeType> m_hedgeType = new TCombo<HedgeType>( HedgeType.values() );
+		final UpperField m_hedgeParam = new UpperField();
+		
+		final JCheckBox m_blockOrder = new JCheckBox();
+		final JCheckBox m_sweepToFill = new JCheckBox();
+		final JCheckBox m_hidden = new JCheckBox();
+		final JCheckBox m_outsideRth = new JCheckBox();
+		final JCheckBox m_allOrNone = new JCheckBox();
+		final JCheckBox m_overrideConstraints = new JCheckBox();
+		final JCheckBox m_notHeld = new JCheckBox();
+		final JCheckBox m_transmit = new JCheckBox();
+		final JCheckBox m_eTradeOnly = new JCheckBox();
+		final JCheckBox m_firmQuoteOnly = new JCheckBox();
+		final JCheckBox m_optOutSmartRouting = new JCheckBox();
+		
+		
+
+		MiscTicketPanel() {
+			VerticalPanel top = new VerticalPanel();
+			top.add( "Order ref", m_orderRef);
+			top.add( "Min Qty", m_minQty);
+			top.add( "Good after", m_goodAfter);
+			top.add( "Good until", m_goodTil);
+			top.add( "Rule 80A", m_rule80A);
+			top.add( "Trigger method", m_trigger);
+			top.add( "Percent Offset", m_percentOffset);
+			top.add( "Trail order stop price", m_trailingStopPrice);
+			top.add( "Trailing percent", m_trailingPercent);
+			top.add("Discretionary amount", m_discretionaryAmt);
+			top.add("NBBO price cap", m_nbboPriceCap);
+
+			top.add( "OCA group and type", m_ocaGroup, m_ocaType);
+			//add( "OCA type", m_ocaType);
+			
+			top.add( "Hedge type and param" , m_hedgeType, m_hedgeParam);
+			//add( "Hedge param", m_hedgeParam);
+			
+			
+			VerticalPanel left = new VerticalPanel();
+			left.add( "Not held", m_notHeld);
+			left.add( "Block order", m_blockOrder);
+			left.add( "Sweep-to-fill", m_sweepToFill);
+			left.add( "Hidden", m_hidden);
+			left.add( "Fill outside RTH", m_outsideRth);
+			left.add( "All-or-none", m_allOrNone);
+
+			VerticalPanel right = new VerticalPanel();
+			right.add( "Override constraints", m_overrideConstraints);
+			right.add( "E-trade only", m_eTradeOnly);
+			right.add( "Firm quote only", m_firmQuoteOnly);
+			right.add( "Opt out SMART routing", m_optOutSmartRouting);
+			right.add( "Transmit", m_transmit);
+			
+			HorzPanel checks = new HorzPanel();
+			checks.add( left);
+			checks.add( Box.createHorizontalGlue());
+			checks.add( right);
+			checks.add( Box.createHorizontalGlue());
+			
+			add( top);
+			add( Box.createVerticalStrut(20));
+			add( checks);
+
+			m_minQty.setText( m_order.minQty() );
+			m_goodAfter.setText( m_order.goodAfterTime() );
+			m_goodTil.setText( m_order.goodTillDate() );
+			m_orderRef.setText( m_order.orderRef() );
+			m_ocaGroup.setText( m_order.ocaGroup() );
+			m_ocaType.setSelectedItem( m_order.ocaType() );
+			m_rule80A.setSelectedItem( m_order.rule80A() );
+			m_trigger.setSelectedItem( m_order.triggerMethod() );
+			m_blockOrder.setSelected( m_order.blockOrder() );
+			m_sweepToFill.setSelected( m_order.sweepToFill() );
+			m_hidden.setSelected( m_order.hidden() );
+			m_outsideRth.setSelected( m_order.outsideRth() );
+			m_allOrNone.setSelected( m_order.allOrNone() );
+			m_overrideConstraints.setSelected( m_order.overridePercentageConstraints() );
+			m_hedgeType.setSelectedItem( m_order.hedgeType() );
+			m_hedgeParam.setText( m_order.hedgeParam() );
+			m_notHeld.setSelected( m_order.notHeld() );
+			m_percentOffset.setText( m_order.percentOffset() );
+			m_trailingStopPrice.setText( m_order.trailStopPrice() );
+			m_trailingPercent.setText( m_order.trailingPercent() );
+			m_discretionaryAmt.setText( m_order.discretionaryAmt() );
+			m_eTradeOnly.setSelected( m_order.eTradeOnly() );
+			m_firmQuoteOnly.setSelected( m_order.firmQuoteOnly() );
+			m_nbboPriceCap.setText( m_order.nbboPriceCap() );
+			m_optOutSmartRouting.setSelected( m_order.optOutSmartRouting() );
+			m_transmit.setSelected( true);
+		}
+		
+		void onOK() {
+			m_order.minQty( m_minQty.getInt() );
+			m_order.goodAfterTime( m_goodAfter.getText() );
+			m_order.goodTillDate( m_goodTil.getText() );
+			m_order.orderRef( m_orderRef.getText() );
+			m_order.ocaGroup( m_ocaGroup.getText() );
+			m_order.ocaType( m_ocaType.getSelectedItem() );
+			m_order.rule80A( m_rule80A.getSelectedItem() );
+			m_order.triggerMethod( m_trigger.getSelectedItem() );
+			m_order.sweepToFill( m_sweepToFill.isSelected() );
+			m_order.hidden( m_hidden.isSelected() );
+			m_order.outsideRth( m_outsideRth.isSelected() );
+			m_order.allOrNone( m_allOrNone.isSelected() );
+			m_order.overridePercentageConstraints( m_overrideConstraints.isSelected() );
+			m_order.hedgeType( m_hedgeType.getSelectedItem() );
+			m_order.hedgeParam( m_hedgeParam.getText() );
+			m_order.notHeld( m_notHeld.isSelected() );
+			m_order.percentOffset( m_percentOffset.getDouble() );
+			m_order.trailStopPrice( m_trailingStopPrice.getDouble() );
+			m_order.trailingPercent( m_trailingPercent.getDouble() );
+			m_order.discretionaryAmt( m_discretionaryAmt.getDouble() );
+			m_order.eTradeOnly( m_eTradeOnly.isSelected() );
+			m_order.firmQuoteOnly( m_firmQuoteOnly.isSelected() );
+			m_order.nbboPriceCap( m_nbboPriceCap.getDouble() );
+			m_order.optOutSmartRouting( m_optOutSmartRouting.isSelected() );
+			m_order.transmit( m_transmit.isSelected() );
+		}
+	}
+	
+	class VolatilityTicketPanel extends VerticalPanel {
+		final UpperField m_volatility = new UpperField();
+		final TCombo<VolatilityType> m_volatilityType = new TCombo<VolatilityType>( VolatilityType.values() );
+		final JCheckBox m_continuousUpdate = new JCheckBox();
+		final TCombo<ReferencePriceType> m_referencePriceType = new TCombo<ReferencePriceType>(ReferencePriceType.values());
+		final TCombo<OrderType> m_deltaNeutralOrderType = new TCombo<OrderType>( OrderType.values() );
+		final UpperField m_deltaNeutralAuxPrice = new UpperField();
+		final UpperField m_deltaNeutralConId = new UpperField();
+		final UpperField m_upper = new UpperField();
+		final UpperField m_lower = new UpperField();
+		
+		VolatilityTicketPanel() {
+			add( "Volatility", m_volatility, m_volatilityType);
+			add( "Continuously update price", m_continuousUpdate);
+			add( "Option reference price", m_referencePriceType);
+			add( "Hedge order type", m_deltaNeutralOrderType);
+			add( "Hedge order aux price", m_deltaNeutralAuxPrice);
+			add( "Hedge contract conid", m_deltaNeutralConId);
+			add( "Stock range - upper", m_upper);
+			add( "Stock range - lower", m_lower);
+			
+			m_volatility.setText( m_order.volatility() );
+			m_volatilityType.setSelectedItem( m_order.volatilityType() );
+			m_continuousUpdate.setSelected( m_order.continuousUpdate() );
+			m_referencePriceType.setSelectedItem( m_order.referencePriceType() );
+			m_deltaNeutralOrderType.setSelectedItem( m_order.deltaNeutralOrderType() );
+			m_deltaNeutralAuxPrice.setText( m_order.deltaNeutralAuxPrice() );
+			m_deltaNeutralConId.setText( m_order.deltaNeutralConId() );
+			m_upper.setText( m_order.stockRangeUpper() );
+			m_lower.setText( m_order.stockRangeLower() );
+		}
+		
+		void onOK() {
+			m_order.volatility( m_volatility.getDouble() );
+			m_order.volatilityType( m_volatilityType.getSelectedItem() );
+			m_order.continuousUpdate( m_continuousUpdate.isSelected() );
+			m_order.referencePriceType( m_referencePriceType.getSelectedItem() );
+			m_order.deltaNeutralOrderType( m_deltaNeutralOrderType.getSelectedItem() );
+			m_order.deltaNeutralAuxPrice( m_deltaNeutralAuxPrice.getDouble() );
+			m_order.deltaNeutralConId( m_deltaNeutralConId.getInt() );
+			m_order.stockRangeUpper( m_upper.getDouble() );
+			m_order.stockRangeLower( m_lower.getDouble() );
+		}
+	}
+	
+	/** This panel edits all ComboParam values except for Non-Guaranteed. 
+	 *  That one goes on main panel because it applies to all combo orders. */
+	class ComboTicketPanel extends VerticalPanel {
+		final UpperField[] m_fields = new UpperField[ComboParam.values().length];
+		
+		ComboTicketPanel() {
+			for (ComboParam param : ComboParam.values() ) {
+				if (param == ComboParam.NonGuaranteed) {
+					continue;
+				}
+				UpperField field = new UpperField();
+				m_fields[param.ordinal()] = field;
+				add( param.toString(), field);
+				field.setText( getVal( param) );
+			}
+		}
+		
+		void onOK() {
+			for (ComboParam param : ComboParam.values() ) {
+				if (param == ComboParam.NonGuaranteed) {
+					continue;
+				}
+				UpperField field = m_fields[param.ordinal()];
+				String val = field.getText();
+				if (val != null && val.length() > 0) {
+					TagValue tv = new TagValue( param.toString(), val);
+					m_order.smartComboRoutingParams().add( tv);
+				}
+			}
+		}
+	}
+	
+	class AlgoPanel extends VerticalPanel {
+		final TCombo<AlgoStrategy> m_strategy = new TCombo<AlgoStrategy>( AlgoStrategy.values() );
+		final UpperField[] m_params = new UpperField[AlgoParam.values().length]; 
+
+		AlgoPanel() {
+			add( "Algo strategy", m_strategy);
+			
+			for (AlgoParam param : AlgoParam.values() ) {
+				int i = param.ordinal();
+				m_params[i] = new UpperField(11);
+				add( param.toString(), m_params[param.ordinal()]);
+			}
+			
+			m_strategy.setSelectedItem( m_order.algoStrategy() );
+			
+			if (m_order.algoParams() != null) {
+				for (TagValue tagVal : m_order.algoParams() ) {
+					AlgoParam param = AlgoParam.valueOf( tagVal.m_tag);
+					m_params[param.ordinal()].setText( tagVal.m_value);
+				}
+			}
+
+			m_strategy.addActionListener( new ActionListener() {
+				@Override public void actionPerformed(ActionEvent e) {
+					onSelChanged();
+				}
+			});
+			
+			onSelChanged();
+		}
+		
+		void onSelChanged() {
+			for (int i = 0; i < m_params.length; i++) {
+				m_params[i].setEnabled( false);
+			}
+			
+			AlgoStrategy strategy = m_strategy.getSelectedItem();
+			if (strategy != null) {
+				for (AlgoParam param : strategy.params() ) {
+					m_params[param.ordinal()].setEnabled( true);
+				}
+			}
+		}
+
+		void onOK() {
+			m_order.algoStrategy( m_strategy.getSelectedItem() );
+			
+			m_order.algoParams().clear();
+			for (AlgoParam param : AlgoParam.values() ) {
+				String val = m_params[param.ordinal()].getText();
+				if (val != null && val.length() > 0) {
+					m_order.algoParams().add( new TagValue( param.toString(), val) );
+				}
+			}
+		}
+	}
+
+	class ScalePanel extends VerticalPanel {
+		UpperField m_initLevelSize = new UpperField();
+		UpperField m_subsLevelSize = new UpperField();
+		UpperField m_priceIncrement = new UpperField();
+		UpperField m_priceAdjustValue = new UpperField();
+		UpperField m_priceAdjustInterval = new UpperField();
+		UpperField m_profitOffset = new UpperField();
+		JCheckBox m_autoReset = new JCheckBox();
+		UpperField m_initPosition = new UpperField();
+		UpperField m_initFillQty = new UpperField();
+		JCheckBox m_randomPercent = new JCheckBox();
+		UpperField m_table = new UpperField();
+
+		ScalePanel() {
+			m_initLevelSize.setText( m_order.scaleInitLevelSize() );
+			m_subsLevelSize.setText( m_order.scaleSubsLevelSize() );
+			m_priceIncrement.setText( m_order.scalePriceIncrement() );
+			m_priceAdjustValue.setText( m_order.scalePriceAdjustValue() );
+			m_priceAdjustInterval.setText( m_order.scalePriceAdjustInterval() );
+			m_profitOffset.setText( m_order.scaleProfitOffset() );
+			m_autoReset.setSelected( m_order.scaleAutoReset() );
+			m_initPosition.setText( m_order.scaleInitPosition() );
+			m_initFillQty.setText( m_order.scaleInitFillQty() );
+			m_randomPercent.setSelected( m_order.scaleRandomPercent() );
+			m_table.setText( m_order.scaleTable() );
+
+			add( "Initial comp size", m_initLevelSize);
+			add( "Subsequent comp size", m_subsLevelSize);
+			add( "Randomize size", m_randomPercent);
+			add( Box.createVerticalStrut( 10) );
+			add( "Price increment", m_priceIncrement);
+			add( "Profit offset", m_profitOffset);
+			add( "Auto-reset", m_autoReset);
+			add( Box.createVerticalStrut( 10) );
+			add( "Initial position", m_initPosition);
+			add( "Filled init comp size", m_initFillQty);
+			add( Box.createVerticalStrut( 10) );
+			add( "Increase price by", m_priceAdjustValue, new JLabel( "every"), m_priceAdjustInterval, new JLabel( "seconds") );
+			add( Box.createVerticalStrut( 10) );
+			add( "Manual table", m_table);
+		}
+	
+		void onOK() {
+			m_order.scaleInitLevelSize( m_initLevelSize.getInt()); 
+			m_order.scaleSubsLevelSize( m_subsLevelSize.getInt()); 
+			m_order.scalePriceIncrement( m_priceIncrement.getDouble()); 
+			m_order.scalePriceAdjustValue( m_priceAdjustValue.getDouble()); 
+			m_order.scalePriceAdjustInterval( m_priceAdjustInterval.getInt()); 
+			m_order.scaleProfitOffset( m_profitOffset.getDouble()); 
+			m_order.scaleAutoReset( m_autoReset.isSelected()); 
+			m_order.scaleInitPosition( m_initPosition.getInt()); 
+			m_order.scaleInitFillQty( m_initFillQty.getInt()); 
+			m_order.scaleRandomPercent( m_randomPercent.isSelected());
+			m_order.scaleTable( m_table.getText() );
+		}
+	}
+
+	private String getVal(ComboParam param) {
+		if (m_order.smartComboRoutingParams() != null) {
+			for (TagValue tv : m_order.smartComboRoutingParams() ) {
+				if (tv.m_tag.equals( param.toString() ) ) {
+					return tv.m_value; 
+				}
+			}
+		}
+		return "";
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/TopModel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import static com.ib.controller.Formats.fmt;
+import static com.ib.controller.Formats.fmtPct;
+import static com.ib.controller.Formats.*;
+
+import java.awt.Color;
+import java.util.ArrayList;
+
+import javax.swing.JLabel;
+import javax.swing.table.AbstractTableModel;
+import javax.swing.table.TableCellRenderer;
+
+import com.ib.controller.ApiController.TopMktDataAdapter;
+import com.ib.controller.Formats;
+import com.ib.controller.NewContract;
+import com.ib.controller.NewTickType;
+import com.ib.controller.Types.MktDataType;
+
+class TopModel extends AbstractTableModel {
+	private ArrayList<TopRow> m_rows = new ArrayList<TopRow>();
+
+	void addRow( NewContract contract) {
+		TopRow row = new TopRow( this, contract.description() );
+		m_rows.add( row);
+		ApiDemo.INSTANCE.controller().reqTopMktData(contract, "", false, row);
+		fireTableRowsInserted( m_rows.size() - 1, m_rows.size() - 1);
+	}
+
+	void addRow( TopRow row) {
+		m_rows.add( row);
+		fireTableRowsInserted( m_rows.size() - 1, m_rows.size() - 1);
+	}
+
+	public void desubscribe() {
+		for (TopRow row : m_rows) {
+			ApiDemo.INSTANCE.controller().cancelTopMktData( row);
+		}
+	}		
+
+	@Override public int getRowCount() {
+		return m_rows.size();
+	}
+	
+	@Override public int getColumnCount() {
+		return 9;
+	}
+	
+	@Override public String getColumnName(int col) {
+		switch( col) {
+			case 0: return "Description";
+			case 1: return "Bid Size";
+			case 2: return "Bid";
+			case 3: return "Ask";
+			case 4: return "Ask Size";
+			case 5: return "Last";
+			case 6: return "Time";
+			case 7: return "Change";
+			case 8: return "Volume";
+			default: return null;
+		}
+	}
+
+	@Override public Object getValueAt(int rowIn, int col) {
+		TopRow row = m_rows.get( rowIn);
+		switch( col) {
+			case 0: return row.m_description;
+			case 1: return row.m_bidSize;
+			case 2: return fmt( row.m_bid);
+			case 3: return fmt( row.m_ask);
+			case 4: return row.m_askSize;
+			case 5: return fmt( row.m_last);
+			case 6: return fmtTime( row.m_lastTime);
+			case 7: return row.change();
+			case 8: return Formats.fmt0( row.m_volume);
+			default: return null;
+		}
+	}
+	
+	public void color(TableCellRenderer rend, int rowIn, Color def) {
+		TopRow row = m_rows.get( rowIn);
+		Color c = row.m_frozen ? Color.gray : def;
+		((JLabel)rend).setForeground( c);
+	}
+
+	public void cancel(int i) {
+		ApiDemo.INSTANCE.controller().cancelTopMktData( m_rows.get( i) );
+	}
+	
+	static class TopRow extends TopMktDataAdapter {
+		AbstractTableModel m_model;
+		String m_description;
+		double m_bid;
+		double m_ask;
+		double m_last;
+		long m_lastTime;
+		int m_bidSize;
+		int m_askSize;
+		double m_close;
+		int m_volume;
+		boolean m_frozen;
+		
+		TopRow( AbstractTableModel model, String description) {
+			m_model = model;
+			m_description = description;
+		}
+
+		public String change() {
+			return m_close == 0	? null : fmtPct( (m_last - m_close) / m_close);
+		}
+
+		@Override public void tickPrice( NewTickType tickType, double price, int canAutoExecute) {
+			switch( tickType) {
+				case BID:
+					m_bid = price;
+					break;
+				case ASK:
+					m_ask = price;
+					break;
+				case LAST:
+					m_last = price;
+					break;
+				case CLOSE:
+					m_close = price;
+					break;
+			}
+			m_model.fireTableDataChanged(); // should use a timer to be more efficient
+		}
+
+		@Override public void tickSize( NewTickType tickType, int size) {
+			switch( tickType) {
+				case BID_SIZE:
+					m_bidSize = size;
+					break;
+				case ASK_SIZE:
+					m_askSize = size;
+					break;
+				case VOLUME:
+					m_volume = size;
+					break;
+			}
+			m_model.fireTableDataChanged();
+		}
+		
+		@Override public void tickString(NewTickType tickType, String value) {
+			switch( tickType) {
+				case LAST_TIMESTAMP:
+					m_lastTime = Long.parseLong( value) * 1000;
+					break;
+			}
+		}
+		
+		@Override public void marketDataType(MktDataType marketDataType) {
+			m_frozen = marketDataType == MktDataType.Frozen;
+			m_model.fireTableDataChanged();
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/TradesPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.BorderLayout;
+import java.awt.FlowLayout;
+import java.util.ArrayList;
+import java.util.HashMap;
+
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.border.TitledBorder;
+import javax.swing.table.AbstractTableModel;
+
+
+import apidemo.util.HtmlButton;
+
+import com.ib.client.CommissionReport;
+import com.ib.client.Execution;
+import com.ib.client.ExecutionFilter;
+import com.ib.controller.NewContract;
+import com.ib.controller.ApiController.ITradeReportHandler;
+
+public class TradesPanel extends JPanel implements ITradeReportHandler {
+	private ArrayList<FullExec> m_trades = new ArrayList<FullExec>();
+	private HashMap<String,FullExec> m_map = new HashMap<String,FullExec>();
+	private Model m_model = new Model();
+	
+	TradesPanel() {
+		JTable table = new JTable( m_model);
+		JScrollPane scroll = new JScrollPane( table);
+		scroll.setBorder( new TitledBorder( "Trade Log"));
+		
+		HtmlButton but = new HtmlButton( "Refresh") {
+			@Override public void actionPerformed() {
+				onRefresh();
+			}
+		};
+
+		JPanel p = new JPanel( new FlowLayout( FlowLayout.RIGHT));
+		p.add( but);
+		
+		setLayout( new BorderLayout() );
+		add( scroll);
+		add( p, BorderLayout.SOUTH);
+	}
+
+	public void activated() {
+		onRefresh();
+	}
+	
+	private void onRefresh() {
+		ApiDemo.INSTANCE.controller().reqExecutions( new ExecutionFilter(), this);
+	}
+
+	@Override public void tradeReport(String tradeKey, NewContract contract, Execution trade) {
+		FullExec full = m_map.get( tradeKey);
+		
+		if (full != null) {
+			full.m_trade = trade;
+		}
+		else {
+			full = new FullExec( contract, trade);
+			m_trades.add( full);
+			m_map.put( tradeKey, full);
+		}
+		
+		m_model.fireTableDataChanged();
+	}
+	
+	@Override public void tradeReportEnd() {
+	}
+	
+	@Override public void commissionReport(String tradeKey, CommissionReport commissionReport) {
+		FullExec full = m_map.get( tradeKey);
+		if (full != null) {
+			full.m_commissionReport = commissionReport;
+		}
+	}
+
+	private class Model extends AbstractTableModel {
+		@Override public int getRowCount() {
+			return m_trades.size();
+		}
+
+		@Override public int getColumnCount() {
+			return 7;
+		}
+		
+		@Override public String getColumnName(int col) {
+			switch( col) {
+				case 0: return "Date/Time";
+				case 1: return "Account";
+				case 2: return "Action";
+				case 3: return "Quantity";
+				case 4: return "Description";
+				case 5: return "Price";
+				case 6: return "Commission";
+				default: return null;
+			}
+		}
+
+		@Override public Object getValueAt(int row, int col) {
+			FullExec full = m_trades.get( row);
+			
+			switch( col) {
+				case 0: return full.m_trade.m_time;
+				case 1: return full.m_trade.m_acctNumber;
+				case 2: return full.m_trade.m_side;
+				case 3: return full.m_trade.m_shares;
+				case 4: return full.m_contract.description();
+				case 5: return full.m_trade.m_price;
+				case 6: return full.m_commissionReport != null ? full.m_commissionReport.m_commission : null;
+				default: return null;
+			}
+		}
+	}
+
+	static class FullExec {
+		NewContract m_contract;
+		Execution m_trade;
+		CommissionReport m_commissionReport;
+		
+		FullExec( NewContract contract, Execution trade) {
+			m_contract = contract;
+			m_trade = trade;
+		}
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/TradingPanel.java
+/* Copyright (C) 2013 Interactive Brokers LLC. All rights reserved.  This code is subject to the terms
+ * and conditions of the IB API Non-Commercial License or the IB API Commercial License, as applicable. */
+
+package apidemo;
+
+import java.awt.Dimension;
+
+import javax.swing.BoxLayout;
+
+import apidemo.util.NewTabbedPanel.NewTabPanel;
+
+
+public class TradingPanel extends NewTabPanel {
+	private final OrdersPanel m_ordersPanel = new OrdersPanel();
+	private final TradesPanel m_tradesPanel = new TradesPanel();
+	
+	TradingPanel() {
+		m_ordersPanel.setPreferredSize( new Dimension( 1, 10000));
+		m_tradesPanel.setPreferredSize( new Dimension( 1, 10000));
+		
+		setLayout( new BoxLayout( this, BoxLayout.Y_AXIS));
+		add( m_ordersPanel);
+		add( m_tradesPanel);
+	}
+
+	/** Called when the tab is first visited. */
+	@Override public void activated() {
+		m_ordersPanel.activated();
+		m_tradesPanel.activated();
+	}
+
+	/** Called when the tab is closed by clicking the X. */
+	@Override public void closed() {
+	}
+}
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/apidemo_test.sh
+FILES=/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/*
+for i in $FILES
+do
+  echo $i
+  echo $i >> apidemo_test.txt
+  cat $i >> apidemo_test.txt
+done
+/Users/Kundjanasith/Documents/workspace/TWS_API/src/apidemo/util
