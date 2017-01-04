@@ -2,6 +2,10 @@ package main;
 
 import apidemo.*;
 import com.ib.controller.*;
+
+import java.io.IOException;
+import java.io.PrintWriter;
+
 import com.ib.client.*;
 
 public class Main implements EWrapper{
@@ -16,6 +20,7 @@ public class Main implements EWrapper{
 		eSocket.eConnect("localhost", 7496, 0);
 		Contract contract = new Contract();
 	    Order order = new Order();
+	    
 	    contract.m_symbol = "IBKR";
 	    contract.m_secType = "STK";
 	    contract.m_exchange = "SMART";
@@ -24,6 +29,7 @@ public class Main implements EWrapper{
 	    order.m_totalQuantity = 100;
 	    order.m_orderType = "LMT";
 	    order.m_lmtPrice = 1000;
+	    
 	    eSocket.placeOrder(40, contract, order);
 	    System.out.println(eSocket.ALIASES);
 	    System.out.println(eSocket.GROUPS);
@@ -34,6 +40,19 @@ public class Main implements EWrapper{
 	    System.out.println(eSocket.PROFILES);
 	    
 	    System.out.println("Finish");
+	    this.writeData("DATA");
+	}
+	
+	private void writeData(String data){
+		try{
+		    PrintWriter writer = new PrintWriter("result.txt", "UTF-8");
+		    System.out.println("Start : writeData() "); 
+		    writer.println(data);
+		    writer.close();
+		    System.out.println("Stop : writeData() "); 
+		} catch (IOException e) {
+		   System.out.println("ERROR : writeData() "); 
+		}
 	}
 	
 	@Override
