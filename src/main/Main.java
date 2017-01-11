@@ -1,15 +1,30 @@
 package main;
 
 import apidemo.*;
-import com.ib.controller.*;
+import apidemo.util.NewTabbedPanel.NewTabPanel;
 
+import com.ib.controller.*;
+import com.ib.controller.ApiController.IHistoricalDataHandler;
+import com.ib.controller.ApiController.IRealTimeBarHandler;
+import com.ib.controller.Profile.Type;
+
+import java.awt.BorderLayout;
+import java.awt.Dimension;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.SwingUtilities;
+import javax.swing.table.AbstractTableModel;
 
 import com.ib.client.*;
 
 public class Main implements EWrapper{
 	EClientSocket eSocket = new EClientSocket(this);
+	static ApiDemo apiDemo = new ApiDemo();
 
 	public static void main(String[] args) {
 		new Main().run();
@@ -18,30 +33,38 @@ public class Main implements EWrapper{
 	private void run() {
 		System.out.println("Start");
 		eSocket.eConnect("localhost", 7496, 0);
-		Contract contract = new Contract();
+		NewContract contract = new NewContract();
 	    Order order = new Order();
 	    
-	    contract.m_symbol = "IBKR";
-	    contract.m_secType = "STK";
-	    contract.m_exchange = "SMART";
-	    contract.m_currency = "USD";   
-	    order.m_action = "BUY";
+//	    contract.m_symbol = "IBKR";
+//	    contract.m_secType = "STK";
+//	    contract.m_exchange = "SMART";
+//	    contract.m_currency = "USD";   
+//	    order.m_action = "BUY";
 	    order.m_totalQuantity = 100;
 	    order.m_orderType = "LMT";
 	    order.m_lmtPrice = 1000;
 	    
-	    eSocket.placeOrder(40, contract, order);
+//	    eSocket.placeOrder(40, contract, order);
 	    System.out.println(eSocket.ALIASES);
 	    System.out.println(eSocket.GROUPS);
 	    System.out.println(eSocket.PROFILES);
-	    eSocket.reqContractDetails(40, contract);
+//	    eSocket.reqContractDetails(40, contract);
 	    System.out.println(eSocket.ALIASES);
 	    System.out.println(eSocket.GROUPS);
 	    System.out.println(eSocket.PROFILES);
+	    List<TagValue> list = new ArrayList();
 	    
+	    
+//	    apiDemo.controller().reqHistoricalData(m_contract, m_end.getText(), m_duration.getInt(), m_durationUnit.getSelectedItem(), m_barSize.getSelectedItem(), m_whatToShow.getSelectedItem(), m_rthOnly.isSelected(), panel);
+	    BarResultsPanel panel = new BarResultsPanel( true);
+	    apiDemo.controller().reqHistoricalData(contract, "20170101 12:00:00", 1, Types.DurationUnit.WEEK, Types.BarSize._1_min, Types.WhatToShow.TRADES, false, panel);
+	    this.historicalData(0, "20170101 12:00:00", 5.0, 166.98, 167.8, 166.5, 1800, 167, 165.0, true);
+//	    eSocket.reqHistoricalData(1, contract, "20170101 12:00:00", "1 D", "1 sec", "TRADES", 0, 1, list);
 	    System.out.println("Finish");
 	    this.writeData("DATA");
 	}
+	
 	
 	private void writeData(String data){
 		try{
